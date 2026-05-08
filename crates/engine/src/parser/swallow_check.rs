@@ -1521,6 +1521,7 @@ fn detect_duration_this_turn(
         "NthSpellThisTurn",
         "NthDrawThisTurn",
         "CardsDrawnThisTurn",
+        "OpponentLostLife",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -1884,6 +1885,17 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_life_loss_turn_history_condition() {
+        let parsed = parse(
+            "{1}{R}, Discard a card, Sacrifice a Vampire: Draw two cards. \
+             Activate only if an opponent lost life this turn.",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
     #[test]
