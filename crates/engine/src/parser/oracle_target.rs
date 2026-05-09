@@ -6355,6 +6355,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_phrase_handles_plural_head_subtype() {
+        let (filter, remainder) = parse_type_phrase("Heads");
+        assert!(
+            remainder.trim().is_empty(),
+            "remainder should be empty, got: '{remainder}'"
+        );
+        match filter {
+            TargetFilter::Typed(typed) => {
+                assert!(typed
+                    .type_filters
+                    .contains(&TypeFilter::Subtype("Head".to_string())));
+            }
+            other => panic!("expected Head subtype filter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_type_phrase_comma_or_three_types() {
         // CR 205.3a: "artifact, creature, or enchantment" — all 3 must appear in Or
         let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment");

@@ -774,6 +774,7 @@ const SUBTYPES: &[&str] = &[
     "Halfling",
     "Hamster",
     "Harpy",
+    "Head",
     "Hellion",
     "Hippo",
     "Hippogriff",
