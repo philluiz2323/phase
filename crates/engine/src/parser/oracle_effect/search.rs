@@ -19,9 +19,9 @@ use super::{capitalize, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
-    TypedFilter,
+    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, ObjectScope,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::keywords::Keyword;
@@ -659,6 +659,12 @@ pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
 
     if let Some(filter) = parse_search_filter_leading_property_stack(type_text, ctx) {
         return filter;
+    }
+
+    if let Ok((rest, filter)) = parse_card_with_highest_mana_value_library_filter(type_text) {
+        if rest.trim().is_empty() {
+            return filter;
+        }
     }
 
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
@@ -1405,6 +1411,70 @@ fn parse_same_total_power_toughness_suffix(
     ))
 }
 
+fn parse_highest_mana_value_library_suffix(
+    input: &str,
+) -> Result<(&str, Vec<FilterProp>), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with the highest mana value among cards in your library with mana value ")
+        .parse(input)?;
+    let (rest, threshold) = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("x or less, where x is ").parse(rest)
+    {
+        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
+            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
+        ("", QuantityExpr::Ref { qty })
+    } else {
+        let (rest, _) = tag("less than or equal to ").parse(rest)?;
+        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
+            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
+        ("", QuantityExpr::Ref { qty })
+    };
+
+    let eligible_filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Library,
+                },
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: threshold.clone(),
+                },
+            ]),
+    );
+
+    Ok((
+        rest,
+        vec![
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: threshold,
+            },
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        filter: eligible_filter,
+                    },
+                },
+            },
+        ],
+    ))
+}
+
+fn parse_card_with_highest_mana_value_library_filter(
+    input: &str,
+) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("card ").parse(input)?;
+    let (rest, properties) = parse_highest_mana_value_library_suffix(rest)?;
+    Ok((
+        rest,
+        TargetFilter::Typed(TypedFilter::card().properties(properties)),
+    ))
+}
+
 fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
     match reference {
         TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
@@ -1701,6 +1771,12 @@ fn parse_search_filter_suffixes(
         if let Ok((rest, prop)) = parse_same_total_power_toughness_suffix(remaining) {
             remaining = rest.trim_start();
             suffix.properties.push(prop);
+            continue;
+        }
+
+        if let Ok((rest, props)) = parse_highest_mana_value_library_suffix(remaining) {
+            remaining = rest.trim_start();
+            suffix.properties.extend(props);
             continue;
         }
 
@@ -3272,6 +3348,87 @@ mod tests {
         assert!(filter
             .properties
             .contains(&FilterProp::MostPrevalentCreatureTypeInLibrary));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn seek_highest_mana_value_under_life_gained_threshold_emits_aggregate_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a card with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn { .. },
+                },
+            }
+        )));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        ..
+                    },
+                },
+            }
+        )));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn seek_highest_mana_value_under_counter_threshold_emits_source_counter_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a card with the highest mana value among cards in your library with mana value x or less, where x is the number of charge counters on ~",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
+                },
+            } if counter_type == "charge"
+        )));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        ..
+                    },
+                },
+            }
+        )));
         assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
             diagnostic,
             OracleDiagnostic::TargetFallback { context, .. }

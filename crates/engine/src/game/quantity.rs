@@ -701,18 +701,14 @@ fn resolve_ref(
         QuantityRef::CountersOn {
             scope,
             counter_type,
-        } => {
-            let object = object_for_scope(state, *scope, ctx, targets);
-            object
-                .map(|obj| match counter_type {
-                    Some(ct) => {
-                        let kind = parse_counter_type(ct);
-                        u32_to_i32_saturating(obj.counters.get(&kind).copied().unwrap_or(0))
-                    }
-                    None => u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()),
-                })
-                .unwrap_or(0)
-        }
+        } => resolve_counters_on_scope(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            counter_type.as_deref(),
+        ),
         // CR 107.3a + CR 601.2b + CR 107.3i: "X" resolves to the value chosen at
         // cast time, carried on the resolving ability's `chosen_x`
         // (CR 601.2b announcement; CR 107.3i makes all instances share the value).
@@ -1639,6 +1635,46 @@ fn object_id_for_scope(
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event),
         ObjectScope::CostPaidObject => None,
+    }
+}
+
+fn counter_count_from_map(counters: &HashMap<CounterType, u32>, counter_type: Option<&str>) -> i32 {
+    match counter_type {
+        Some(ct) => {
+            let kind = parse_counter_type(ct);
+            u32_to_i32_saturating(counters.get(&kind).copied().unwrap_or(0))
+        }
+        None => u32_to_i32_saturating(counters.values().copied().sum::<u32>()),
+    }
+}
+
+fn resolve_counters_on_scope(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    counter_type: Option<&str>,
+) -> i32 {
+    match scope {
+        ObjectScope::Source => state
+            .objects
+            .get(&ctx.source)
+            .map(|obj| counter_count_from_map(&obj.counters, counter_type))
+            .or_else(|| {
+                state
+                    .lki_cache
+                    .get(&ctx.source)
+                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
+            })
+            .unwrap_or(0),
+        ObjectScope::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .map(|snapshot| counter_count_from_map(&snapshot.lki.counters, counter_type))
+            .unwrap_or(0),
+        _ => object_for_scope(state, scope, ctx, targets)
+            .map(|obj| counter_count_from_map(&obj.counters, counter_type))
+            .unwrap_or(0),
     }
 }
 
@@ -3822,6 +3858,35 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
+    }
+
+    #[test]
+    fn resolve_quantity_counters_on_source_falls_back_to_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runecarved Obelisk".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 3);
+        let lki = state.objects[&source].snapshot_for_mana_spent();
+        state.lki_cache.insert(source, lki);
+        state.objects.remove(&source);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some("charge".to_string()),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
     }
 
     /// CR 122.1: `AnyCountersOnSelf` sums every counter type on the source
