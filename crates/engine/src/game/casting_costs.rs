@@ -243,6 +243,15 @@ fn finish_pending_cost_or_cast(
 
     if matches!(
         pending.additional_cost_flow,
+        Some(AdditionalCost::Required(_))
+    ) {
+        if let Some(AdditionalCost::Required(cost)) = pending.additional_cost_flow.take() {
+            return pay_additional_cost(state, player, cost, pending, events);
+        }
+    }
+
+    if matches!(
+        pending.additional_cost_flow,
         Some(AdditionalCost::Kicker { .. })
     ) {
         if pending.deferred_target_selection {
@@ -1612,6 +1621,21 @@ fn pay_additional_cost(
             }));
             return enter_payment_step(state, player, Some(ConvokeMode::Waterbend), events);
         }
+        AbilityCost::Composite { costs } => {
+            let mut costs = costs.into_iter();
+            let Some(first) = costs.next() else {
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            };
+            let remaining: Vec<_> = costs.collect();
+            let mut pending = pending;
+            if !remaining.is_empty() {
+                pending.additional_cost_flow =
+                    Some(AdditionalCost::Required(AbilityCost::Composite {
+                        costs: remaining,
+                    }));
+            }
+            return pay_additional_cost(state, player, first, pending, events);
+        }
         AbilityCost::Exile {
             count,
             zone: Some(zone),
@@ -2401,13 +2425,31 @@ pub(super) fn auto_tap_mana_sources(
     events: &mut Vec<GameEvent>,
     deprioritize_source: Option<ObjectId>,
 ) {
-    auto_tap_mana_sources_inner(
+    auto_tap_mana_sources_excluding(
         state,
         player,
         cost,
         events,
         deprioritize_source,
         &HashSet::new(),
+    );
+}
+
+pub(super) fn auto_tap_mana_sources_excluding(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+) {
+    auto_tap_mana_sources_inner(
+        state,
+        player,
+        cost,
+        events,
+        deprioritize_source,
+        excluded_sources,
     );
 }
 

@@ -2125,6 +2125,22 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // CR 702.120a: Escalate is a keyword additional-cost declaration on
+        // modal spells. Intercept before the instant/sorcery effect catch-all
+        // so "Escalate—Tap an untapped creature you control." is extracted as
+        // keyword data instead of an Unimplemented spell ability.
+        if tag::<_, _, OracleError<'_>>("escalate")
+            .parse(lower.as_str())
+            .is_ok()
+        {
+            let lower_clean = lower.trim_end_matches('.').trim();
+            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             // B7: Strip ability-word prefix and attach condition for spell effects.

@@ -1,9 +1,11 @@
 use crate::types::ability::{
-    AbilityTag, Effect, ModalChoice, QuantityExpr, TargetRef, TargetSelectionMode,
+    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, TargetRef,
+    TargetSelectionMode,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
@@ -50,6 +52,10 @@ pub(crate) fn handle_select_modes(
     // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
     // the additional costs — alternative-cost permissions never waive them.
     let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
+    let mut pending = pending;
+    if let Some(cost) = escalate_cost_for_selected_modes(state, player, &pending, indices.len()) {
+        pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
+    }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state
@@ -363,6 +369,37 @@ pub(crate) fn compute_modal_total_cost(
     total
 }
 
+fn escalate_cost_for_selected_modes(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    selected_mode_count: usize,
+) -> Option<AbilityCost> {
+    let additional_modes = selected_mode_count.checked_sub(1)?;
+    if additional_modes == 0 {
+        return None;
+    }
+
+    let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Escalate(cost) => Some(cost),
+            _ => None,
+        })?;
+
+    Some(repeat_escalate_cost(cost, additional_modes))
+}
+
+fn repeat_escalate_cost(cost: AbilityCost, count: usize) -> AbilityCost {
+    if count == 1 {
+        cost
+    } else {
+        AbilityCost::Composite {
+            costs: vec![cost; count],
+        }
+    }
+}
+
 /// CR 601.2d: Extract a fixed distribution total from an effect's amount field.
 /// Returns `None` if the amount depends on X or other runtime values (deferred to post-payment).
 fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
@@ -483,5 +520,33 @@ mod tests {
             compute_modal_total_cost(&base, &modal, &[0, 1]),
             ManaCost::generic(2),
         );
+    }
+
+    /// CR 702.120a: Escalate cost is paid once per mode chosen beyond the first.
+    /// Single repetition returns the cost unwrapped; multi repetition wraps in
+    /// `Composite` so each repeat is paid sequentially.
+    #[test]
+    fn repeat_escalate_cost_wraps_in_composite_for_multiple_extra_modes() {
+        let cost = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+
+        // One extra mode (2 modes selected): no Composite wrapper.
+        assert!(matches!(
+            repeat_escalate_cost(cost.clone(), 1),
+            AbilityCost::Mana { .. }
+        ));
+
+        // Two extra modes (3 modes selected): Composite with two clones.
+        match repeat_escalate_cost(cost.clone(), 2) {
+            AbilityCost::Composite { costs } => assert_eq!(costs.len(), 2),
+            other => panic!("expected Composite, got {other:?}"),
+        }
+
+        // Three extra modes (4 modes selected): Composite with three clones.
+        match repeat_escalate_cost(cost, 3) {
+            AbilityCost::Composite { costs } => assert_eq!(costs.len(), 3),
+            other => panic!("expected Composite, got {other:?}"),
+        }
     }
 }

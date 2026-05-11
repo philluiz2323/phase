@@ -660,9 +660,9 @@ pub enum Keyword {
     /// CR 702.52a: Transmute {cost} — discard this card and pay {cost} to search
     /// your library for a card with the same mana value.
     Transmute(ManaCost),
-    /// CR 702.120a: Escalate {cost} — additional cost for each mode chosen beyond the first
+    /// CR 702.120a: Escalate [cost] — additional cost for each mode chosen beyond the first
     /// on a modal spell.
-    Escalate(ManaCost),
+    Escalate(AbilityCost),
     /// CR 702.59a: Recover {cost} — triggered ability: when a creature is put into your
     /// graveyard from the battlefield, you may pay {cost} to return this card from your
     /// graveyard to your hand; otherwise exile it.
@@ -1393,8 +1393,12 @@ impl FromStr for Keyword {
                 }
                 // CR 702.52a: Transmute {cost}
                 "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
-                // CR 702.120a: Escalate {cost}
-                "escalate" => return Ok(Keyword::Escalate(parse_keyword_mana_cost(p))),
+                // CR 702.120a: Escalate [cost]
+                "escalate" => {
+                    return Ok(Keyword::Escalate(AbilityCost::Mana {
+                        cost: parse_keyword_mana_cost(p),
+                    }))
+                }
                 // CR 702.59a: Recover {cost}
                 "recover" => return Ok(Keyword::Recover(parse_keyword_mana_cost(p))),
                 // CR 702.148a: Cleave {cost}
@@ -1823,6 +1827,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
         "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
+        "Escalate" => {
+            if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
+                Ok(Keyword::Escalate(cost))
+            } else {
+                Ok(Keyword::Escalate(AbilityCost::Mana { cost: mana(data)? }))
+            }
+        }
         // CR 702.41a
         "Affinity" => {
             let tf: TypedFilter =
