@@ -1895,6 +1895,22 @@ fn evaluate_replacement_condition(
                     .is_some_and(|o| o.controller == controller)
             })
         }
+        // CR 702.54a (Bloodthirst): "if an opponent was dealt damage this turn"
+        // — applies only when any opponent of `controller` is the target of a
+        // damage record. Per CR 702.54a the damage source is irrelevant — ANY
+        // damage to ANY opponent of the entering permanent's controller
+        // satisfies the condition. `damage_dealt_this_turn` is cleared on
+        // turn start (`start_next_turn`).
+        ReplacementCondition::OpponentDamagedThisTurn => {
+            let opponents = crate::game::players::opponents(state, controller);
+            state.damage_dealt_this_turn.iter().any(|r| match r.target {
+                TargetRef::Player(pid) => opponents.contains(&pid),
+                TargetRef::Object(oid) => state
+                    .objects
+                    .get(&oid)
+                    .is_some_and(|obj| opponents.contains(&obj.controller)),
+            })
+        }
         // CR 702.33d + CR 702.33f: "if was kicked" — applies only when the
         // source permanent's spell was kicked. `kickers_paid` is populated at
         // cast resolution from `SpellContext.kickers_paid`. When `variant` is

@@ -7716,6 +7716,15 @@ pub enum ReplacementCondition {
     /// creature earlier this turn. Evaluated against
     /// `state.creatures_attacked_this_turn` for the controller.
     YouAttackedThisTurn,
+    /// CR 702.54a (Bloodthirst) + CR 614.1c: "if an opponent was dealt damage
+    /// this turn" — replacement applies only when any opponent of the
+    /// replacement's controller was the target of a damage event recorded in
+    /// `state.damage_dealt_this_turn` earlier this turn. The damage need not
+    /// have originated from the controller; ANY source dealing damage to ANY
+    /// opponent satisfies CR 702.54a. Tracking is cleared at turn start via
+    /// `start_next_turn` (CR 514.2 cleanup is one earlier mechanism; the
+    /// per-turn store is cleared on the active player's next turn-start).
+    OpponentDamagedThisTurn,
     /// CR 702.33d + CR 702.33f: "if was kicked" — replacement applies only when
     /// the source permanent's spell was cast with at least one kicker cost paid.
     /// Optional `variant` narrows to a specific kicker position (CR 702.33f:

@@ -1947,6 +1947,121 @@ fn is_modular_dies_transfer_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+/// CR 702.54a: Bloodthirst N is a static ability. "Bloodthirst N" means
+/// "If an opponent was dealt damage this turn, this permanent enters with
+/// N +1/+1 counters on it." Modeled as a `ReplacementEvent::Moved` (i.e.,
+/// ETB) replacement on `SelfRef` whose `condition` is the per-turn
+/// damage-history gate `ReplacementCondition::OpponentDamagedThisTurn`. The
+/// gate is checked at replacement-applicability time so the condition
+/// reflects game state at the moment the permanent attempts to enter, not
+/// at synthesis time.
+///
+/// CR 702.54c + CR 113.2c: Each Bloodthirst instance applies separately.
+/// No printed card today carries two instances, but the per-N idempotency
+/// match below treats the count as load-bearing so a granted-Bloodthirst
+/// case or future printing routes correctly. The idempotency predicate
+/// additionally requires the gating `OpponentDamagedThisTurn` condition,
+/// so a parsed `ReplacementEvent::Moved` + `PutCounter(SelfRef, P1P1,
+/// Fixed(N))` without the condition (e.g., a printed unconditional "enters
+/// with N counters" replacement) does NOT pre-satisfy the Bloodthirst
+/// emission — both will coexist.
+///
+/// Bloodthirst X (CR 702.54b, single printed card "Petrified Wood-Kin")
+/// is NOT handled here: it currently parses to `Bloodthirst(1)` due to a
+/// parser-side limitation in representing X-form Bloodthirst, and the
+/// X-resolution-to-damage-amount semantics are distinct from Fixed-N.
+/// That gap is tracked separately as a parser-bug ticket.
+pub fn synthesize_bloodthirst(face: &mut CardFace) {
+    let bloodthirst_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Bloodthirst(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if bloodthirst_values.is_empty() {
+        return;
+    }
+
+    // Per CR 702.54c + CR 113.2c: each Bloodthirst instance emits its own
+    // ETB replacement. To survive re-running synthesis idempotently, count
+    // existing same-N replacements and emit only the delta.
+    for &n in &bloodthirst_values {
+        let needed = bloodthirst_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+        let etb_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: "P1P1".to_string(),
+                count: QuantityExpr::Fixed { value: n as i32 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with {n} +1/+1 counter{} on it",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(etb_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            condition: Some(ReplacementCondition::OpponentDamagedThisTurn),
+            description: Some(format!(
+                "CR 702.54a: Bloodthirst {n} — if an opponent was dealt damage this turn, this permanent enters with {n} +1/+1 counter{} on it.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_bloodthirst`. True iff
+/// `replacement` is a `Moved` replacement on `SelfRef` gated by
+/// `ReplacementCondition::OpponentDamagedThisTurn` whose execute body is
+/// `Effect::PutCounter` placing exactly `expected_n` P1P1 counters on
+/// `SelfRef` with a fixed count.
+///
+/// The `expected_n` argument is load-bearing: a card carrying both a parsed
+/// "enters with K +1/+1 counters" replacement AND `Keyword::Bloodthirst(N)`
+/// with K ≠ N must NOT silently dedupe. The condition match is also
+/// load-bearing: an unconditional ETB-with-counters replacement (e.g., a
+/// printed "this permanent enters with N +1/+1 counters on it") with the
+/// same N is NOT a Bloodthirst replacement and must not pre-satisfy the
+/// emit (Bloodthirst is conditional on damage history, the printed
+/// unconditional one always fires).
+fn is_bloodthirst_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+        || !matches!(
+            replacement.condition,
+            Some(ReplacementCondition::OpponentDamagedThisTurn)
+        )
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        } if counter_type == "P1P1" && *value == expected_n as i32
+    )
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -2273,6 +2388,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // dies-trigger transferring counters (LKI-counted) to a target artifact
     // creature. Each instance functions independently.
     synthesize_modular(face);
+    // CR 702.54a + CR 702.54c: Bloodthirst N — ETB-with-N-P1P1 replacement
+    // gated on "an opponent was dealt damage this turn". Each instance
+    // functions independently. Bloodthirst X is parser-deferred.
+    synthesize_bloodthirst(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -7320,5 +7439,540 @@ mod modular_runtime_tests {
             GameAction::DecideOptionalEffect { accept: true },
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bloodthirst_synthesis_tests {
+    //! CR 702.54a + CR 702.54c: Shape tests for the synthesized Bloodthirst
+    //! ETB-with-counters replacement. Pinned to the exact wire-up the
+    //! runtime resolver consumes: `ReplacementEvent::Moved` with `valid_card
+    //! = SelfRef`, `condition = OpponentDamagedThisTurn`, execute
+    //! `Effect::PutCounter { counter_type: "P1P1", count: Fixed(N), target:
+    //! SelfRef }`.
+    use super::*;
+
+    fn face_with_bloodthirst(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bloodthirst(n));
+        face
+    }
+
+    /// CR 702.54a: ETB-with-N-counters replacement gated on
+    /// `OpponentDamagedThisTurn`.
+    #[test]
+    fn synthesize_bloodthirst_adds_conditional_etb_replacement() {
+        let mut face = face_with_bloodthirst(2);
+        synthesize_bloodthirst(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_bloodthirst_etb_replacement(r, 2))
+            .expect("bloodthirst should synthesize an ETB-with-counters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert!(matches!(
+            replacement.condition,
+            Some(ReplacementCondition::OpponentDamagedThisTurn)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("bloodthirst ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, "P1P1");
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+    }
+
+    /// Re-running synthesis must not duplicate the replacement.
+    #[test]
+    fn synthesize_bloodthirst_is_idempotent() {
+        let mut face = face_with_bloodthirst(3);
+        synthesize_bloodthirst(&mut face);
+        synthesize_bloodthirst(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_bloodthirst_etb_replacement(r, 3))
+                .count(),
+            1,
+            "ETB replacement should be deduped"
+        );
+    }
+
+    /// A face without `Keyword::Bloodthirst` is unaffected.
+    #[test]
+    fn synthesize_bloodthirst_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_bloodthirst(&mut face);
+        assert!(face.replacements.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// Negative test: unrelated keywords do not synthesize Bloodthirst.
+    #[test]
+    fn synthesize_bloodthirst_does_not_affect_other_keywords() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Trample);
+        face.keywords.push(Keyword::Vigilance);
+        synthesize_bloodthirst(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+
+    /// CR 113.2c + CR 702.54c: each Bloodthirst instance emits its own ETB
+    /// replacement. No printed card today has two Bloodthirst instances;
+    /// the test pins the rule so a future printing (or a granted-Bloodthirst
+    /// case) routes correctly.
+    #[test]
+    fn synthesize_bloodthirst_emits_one_replacement_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bloodthirst(1));
+        face.keywords.push(Keyword::Bloodthirst(3));
+        synthesize_bloodthirst(&mut face);
+
+        let replacement_n1 = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, 1))
+            .count();
+        let replacement_n3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, 3))
+            .count();
+        assert_eq!(replacement_n1, 1, "exactly one Fixed(1) ETB replacement");
+        assert_eq!(replacement_n3, 1, "exactly one Fixed(3) ETB replacement");
+    }
+
+    /// CR 702.54a regression guard: a face that already carries a parsed
+    /// "enters with K +1/+1 counters" ETB replacement with K ≠ N MUST still
+    /// receive a synthesized Fixed(N) replacement. The per-N predicate
+    /// prevents the K-replacement from silently pre-satisfying the
+    /// Bloodthirst-N idempotency check (and the resulting card from
+    /// entering with the wrong counter count).
+    #[test]
+    fn is_bloodthirst_etb_replacement_per_n_predicate_distinguishes_k_vs_n() {
+        let mut face = face_with_bloodthirst(2);
+
+        // Pre-existing K=3 unconditional ETB replacement (as if a parser had
+        // emitted one for a printed "this permanent enters with 3 +1/+1
+        // counters on it" clause). Shape matches Bloodthirst's emission except
+        // for the count AND the absence of the OpponentDamagedThisTurn
+        // condition.
+        let unrelated_etb = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: "P1P1".to_string(),
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(unrelated_etb);
+
+        synthesize_bloodthirst(&mut face);
+
+        // The K=3 replacement does not match the per-N predicate (its count
+        // is 3, not 2; and it has no condition).
+        let fixed_2_with_condition = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, 2))
+            .count();
+        assert_eq!(
+            fixed_2_with_condition, 1,
+            "Bloodthirst N=2 must emit its own Fixed(2)+condition replacement"
+        );
+
+        // An unconditional ETB-counters replacement with the SAME N as
+        // Bloodthirst N must ALSO not dedupe — Bloodthirst is conditional,
+        // the printed unconditional replacement is not. They must coexist.
+        let mut face2 = face_with_bloodthirst(2);
+        let unconditional_same_n = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: "P1P1".to_string(),
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face2.replacements.push(unconditional_same_n);
+        synthesize_bloodthirst(&mut face2);
+        // Two replacements: the unconditional one (no condition) and the
+        // Bloodthirst-synthesized one (with condition).
+        assert_eq!(
+            face2.replacements.len(),
+            2,
+            "unconditional Fixed(N) and conditional Fixed(N) must coexist — \
+             they are not the same replacement"
+        );
+        assert_eq!(
+            face2
+                .replacements
+                .iter()
+                .filter(|r| is_bloodthirst_etb_replacement(r, 2))
+                .count(),
+            1,
+            "only the gated one is a Bloodthirst replacement"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bloodthirst_runtime_tests {
+    //! CR 702.54a runtime integration: a Bloodthirst-bearing creature
+    //! enters with N +1/+1 counters via the synthesized Moved replacement
+    //! ONLY IF an opponent of the controller was dealt damage earlier this
+    //! turn (recorded in `state.damage_dealt_this_turn`). Without the
+    //! recorded damage the replacement still matches the event but its
+    //! condition is false, so the ETB-with-counters effect is suppressed
+    //! and the permanent enters with 0 counters.
+
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{QuantityModification, TargetRef};
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::game_state::{DamageRecord, GameState, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build a creature face with `Keyword::Bloodthirst(n)` and run the
+    /// full synthesis pipeline.
+    fn bloodthirst_face(name: &str, n: u32, base_pt: i32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(base_pt)),
+            toughness: Some(PtValue::Fixed(base_pt)),
+            keywords: vec![Keyword::Bloodthirst(n)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    fn setup_state_with_priority(controller: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        state
+    }
+
+    /// Drive a real Hand→Battlefield ZoneChange through the replacement
+    /// pipeline, mirroring `spawn_arcbound_via_etb_pipeline`. The
+    /// synthesized `ReplacementEvent::Moved` is absorbed by the pipeline
+    /// into `enter_with_counters` (when the condition holds) and the
+    /// resulting per-counter `add_counter_with_replacement` calls layer in
+    /// any `AddCounter` modifiers (e.g., Hardened Scales).
+    fn spawn_bloodthirst_via_etb_pipeline(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(state, next_card, controller, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            obj_id,
+            Zone::Hand,
+            Zone::Battlefield,
+            None,
+        );
+        let mut events = Vec::new();
+        let result = crate::game::replacement::replace_event(state, proposed, &mut events);
+        // When the condition is false, the replacement is not a candidate
+        // and `replace_event` returns the unmodified Execute(ZoneChange)
+        // with empty `enter_with_counters`. When the condition is true the
+        // replacement applies and `enter_with_counters` is populated.
+        let crate::game::replacement::ReplacementResult::Execute(event) = result else {
+            panic!("Bloodthirst ETB pipeline must return Execute, got {result:?}");
+        };
+        let crate::types::proposed_event::ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_with_counters,
+            ..
+        } = event
+        else {
+            panic!("pipeline must yield a ZoneChange execute event");
+        };
+        move_to_zone(state, object_id, to, &mut events);
+        let actor = state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(controller);
+        for (counter_type_str, count) in &enter_with_counters {
+            let ct = crate::types::counter::parse_counter_type(counter_type_str);
+            crate::game::effects::counters::add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                ct,
+                *count,
+                &mut events,
+            );
+        }
+        obj_id
+    }
+
+    /// CR 702.54a: with no recorded opponent damage this turn, the
+    /// Bloodthirst ETB replacement's condition is false and the permanent
+    /// enters with 0 counters. The Moved event still resolves (the
+    /// replacement only gates the inner counter-placing effect).
+    #[test]
+    fn bloodthirst_etb_no_damage_dealt_enters_without_counters() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Verify the per-turn damage tracker is empty at the start.
+        assert!(state.damage_dealt_this_turn.is_empty());
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        assert_eq!(obj.zone, Zone::Battlefield, "object must reach battlefield");
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 0,
+            "Bloodthirst with no opponent damage this turn: no counters"
+        );
+    }
+
+    /// CR 702.54a: when an opponent has been dealt damage this turn, the
+    /// Bloodthirst condition is true and the permanent enters with N P1P1
+    /// counters via the absorbed `Effect::PutCounter` execute body.
+    #[test]
+    fn bloodthirst_etb_after_damage_dealt_enters_with_n_counters() {
+        let face = bloodthirst_face("Test Bloodthirster", 3, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Record direct damage to opponent (PlayerId(1)) earlier this turn.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999), // any source; CR 702.54a doesn't care
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: false,
+        });
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        assert_eq!(obj.zone, Zone::Battlefield);
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 3,
+            "Bloodthirst N=3 with opponent damaged earlier this turn → 3 counters"
+        );
+    }
+
+    /// CR 702.54a + CR 614.1c: the condition is checked at the ETB window
+    /// (replacement-applicability time). If opponent damage happens AFTER
+    /// the permanent has entered, no retroactive counters appear.
+    #[test]
+    fn bloodthirst_condition_only_checks_at_etb_window() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // No damage recorded yet.
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        // After the permanent has entered, record damage to the opponent.
+        // This must NOT retroactively add counters.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: false,
+        });
+
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 0,
+            "post-ETB damage must not retroactively add counters"
+        );
+    }
+
+    /// CR 702.54a + CR 115.1 (multiplayer): in a 3-player game, ANY
+    /// opponent being dealt damage satisfies the condition. The rule
+    /// reads "an opponent" not "a specific opponent" — damage to any
+    /// non-controller, non-eliminated player suffices.
+    #[test]
+    fn bloodthirst_in_3p_any_opponent_damaged_satisfies_condition() {
+        let face = bloodthirst_face("Test Bloodthirster", 1, 2);
+
+        // Build a 3-player state. `new_two_player` is the only constructor;
+        // we extend with a third player by mirroring its initialization.
+        // `opponents()` consults `seat_order` (CR 102.2), so both
+        // `state.players` and `state.seat_order` must include the third
+        // seat or the helper will not recognize it as an opponent.
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let third_player = {
+            let template = state.players[1].clone();
+            let mut p2 = template;
+            p2.id = PlayerId(2);
+            state.players.push(p2);
+            state.seat_order.push(PlayerId(2));
+            PlayerId(2)
+        };
+
+        // Damage dealt to the SECOND opponent (PlayerId(2)) — not the
+        // primary opponent (PlayerId(1)). Bloodthirst still triggers.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(third_player),
+            amount: 2,
+            is_combat: false,
+        });
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        let p1p1 = *state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(p1p1, 1, "damage to ANY opponent satisfies CR 702.54a");
+    }
+
+    /// CR 702.54a + CR 614.1a + CR 614.1c: with the condition satisfied,
+    /// the Bloodthirst ETB absorbs a `PutCounter(Fixed(N))` into
+    /// `enter_with_counters`. Each per-counter `AddCounter` event then
+    /// passes through the replacement pipeline, where a real Hardened
+    /// Scales replacement (`QuantityModification::Plus { 1 }` filtered to
+    /// P1P1) modifies the count → N + 1 counters land.
+    #[test]
+    fn bloodthirst_with_hardened_scales_doubles_counters_when_condition_met() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Condition satisfied: an opponent was damaged earlier this turn.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+        });
+
+        // Install Hardened Scales as a battlefield object.
+        let hs_card = CardId(state.next_object_id);
+        let hs_id = create_object(
+            &mut state,
+            hs_card,
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let hs_obj = state.objects.get_mut(&hs_id).unwrap();
+            hs_obj.card_types.core_types.push(CoreType::Enchantment);
+            hs_obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Plus { value: 1 })
+                    .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                    .description("Hardened Scales".to_string()),
+            );
+        }
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+        let p1p1 = *state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            p1p1, 3,
+            "Hardened Scales adds +1 to the Bloodthirst N=2 ETB: 2 + 1 = 3"
+        );
+    }
+
+    /// CR 514.2 + CR 702.54a: the damage-history store is cleared at the
+    /// start of the next turn (`start_next_turn` clears
+    /// `damage_dealt_this_turn`). Damage on turn 1 must NOT carry over
+    /// into a Bloodthirst check on turn 2.
+    #[test]
+    fn bloodthirst_condition_clears_at_end_of_turn() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Turn 1: opponent took damage.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+        });
+
+        // Advance to the next turn via the real engine path that clears
+        // `damage_dealt_this_turn`.
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut state, &mut events);
+        assert!(
+            state.damage_dealt_this_turn.is_empty(),
+            "start_next_turn must clear the per-turn damage record"
+        );
+
+        // Re-park the engine on priority for the new active player so the
+        // ETB pipeline has a consistent starting state.
+        let new_active = state.active_player;
+        state.priority_player = new_active;
+        state.waiting_for = WaitingFor::Priority { player: new_active };
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, new_active);
+        let p1p1 = *state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            p1p1, 0,
+            "after turn rollover the previous turn's damage no longer counts"
+        );
     }
 }
