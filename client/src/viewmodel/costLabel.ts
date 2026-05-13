@@ -267,6 +267,12 @@ export function abilityChoiceLabel(
       if (produced.type === "Colorless") {
         return { label: "Add {C}" };
       }
+      if (produced.type === "AnyOneColor") {
+        const count = formatQuantity((produced as { count?: QuantityExpr | number }).count, 1);
+        return {
+          label: count === "1" ? "Add one mana of any color" : `Add ${count} mana of any one color`,
+        };
+      }
     }
     const label = abilityLabel(ability);
     const description = ability?.description ? stripCostPrefix(ability.description) : undefined;

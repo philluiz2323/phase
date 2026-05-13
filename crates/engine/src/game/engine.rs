@@ -8502,6 +8502,163 @@ mod tests {
     }
 
     #[test]
+    fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() {
+        let mut state = setup_game_at_main_phase();
+
+        let holdout = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(0),
+            "Holdout Settlement".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&holdout).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let abilities = Arc::make_mut(&mut obj.abilities);
+            abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+            abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                crate::types::mana::ManaColor::White,
+                                crate::types::mana::ManaColor::Blue,
+                                crate::types::mana::ManaColor::Black,
+                                crate::types::mana::ManaColor::Red,
+                                crate::types::mana::ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::TapCreatures {
+                            count: 1,
+                            filter: TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .into(),
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(105),
+            PlayerId(0),
+            "Memnite".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        let holdout_actions = grouped
+            .get(&holdout)
+            .expect("Holdout Settlement should expose legal mana actions");
+        assert!(holdout_actions.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0
+            } if *source_id == holdout
+        )));
+        assert!(holdout_actions.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 1
+            } if *source_id == holdout
+        )));
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: holdout,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+
+        match result.waiting_for {
+            WaitingFor::TapCreaturesForManaAbility {
+                player,
+                count,
+                creatures,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert_eq!(creatures, vec![creature]);
+            }
+            other => panic!("expected TapCreaturesForManaAbility, got {other:?}"),
+        }
+        assert!(!state.objects.get(&holdout).unwrap().tapped);
+        assert!(!state.objects.get(&creature).unwrap().tapped);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![creature],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ChooseManaColor {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(state.objects.get(&holdout).unwrap().tapped);
+        assert!(state.objects.get(&creature).unwrap().tapped);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    #[test]
     fn non_mana_activation_tap_creatures_cost_prompts_then_pays() {
         let mut state = setup_game_at_main_phase();
 
