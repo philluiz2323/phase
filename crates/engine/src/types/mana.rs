@@ -78,6 +78,11 @@ impl From<ManaColor> for ManaType {
 /// different rule domain that warrants its own ability surface rather than
 /// extending this enum. Likewise, any effect that fires at a non-step-end
 /// time (e.g., on cost payment, on damage) does not belong here.
+///
+/// See `game::static_abilities::player_step_end_mana_handlers` for the
+/// forward-compatible scan over both `Retain` and `Transform` actions: the
+/// transient-effect path picks up spell-installed handlers of either action
+/// today (dormant for `Transform`, since no current spell installs one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StepEndManaAction {
     Retain,

@@ -587,6 +587,29 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
 /// Scans printed statics on battlefield permanents and transient continuous
 /// effects pinned to the player via `SpecificPlayer` (spell-installed
 /// handlers like The Last Agni Kai's "Until end of turn, …" clause).
+///
+/// **Forward-compatible scan over both `Retain` and `Transform` actions.**
+/// The TCE pass below collects any `AddStaticMode { StepEndUnspentMana { .. } }`
+/// regardless of `action`. Today no spell-effect parser arm constructs a
+/// transient `Transform(_)` — only `oracle_static.rs` builds `Transform`,
+/// and it does so on the printed-static path (Horizon Stone et al.), which
+/// flows through `battlefield_active_statics` above rather than through
+/// `transient_continuous_effects`. The Transform arm of this TCE scan is
+/// therefore dormant in the current corpus.
+///
+/// The path is intentional: a future spell with "Until end of turn, if you
+/// would lose unspent mana, that mana becomes red instead" (or similar
+/// turn-scoped transformation rider) installs through the same channel as
+/// The Last Agni Kai's retention rider — `register_transient_effect` with
+/// `affected: SpecificPlayer { id }` and `AddStaticMode { StepEndUnspentMana
+/// { _, Transform(_) } }` — and this scan picks it up with no further
+/// plumbing. If that future printing never materializes the Transform arm
+/// is dead code, but the cost is zero: the match in
+/// `ManaPool::clear_step_transition` is exhaustive on `StepEndManaAction`
+/// either way, and removing the arm would re-fragment the unified handler
+/// shape the H3 parameterization established. See `StepEndManaAction` in
+/// `types/mana.rs` for the sibling-cluster trip-trigger that gates further
+/// action variants.
 pub fn player_step_end_mana_handlers(
     state: &GameState,
     player_id: PlayerId,
