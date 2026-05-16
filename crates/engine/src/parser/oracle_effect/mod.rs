@@ -14013,8 +14013,15 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
         if let Some(quantity) = parse_where_x_is(after_cost) {
             return Some(AbilityCost::ManaDynamic { quantity });
         }
-        // {X} without "where X is" — unresolvable, skip
-        return None;
+        // CR 107.3a + CR 118.12: bare {X} unless-cost references the announced X
+        // of the spell carrying this counter.
+        return Some(AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
     }
     let cost = parse_mtgjson_mana_cost(cost_text);
     if let Some(unless_cost) = parse_unless_for_each_payment(&cost_str[cost_end..], &cost) {
@@ -14113,6 +14120,22 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<AbilityCost> {
         if rest.trim().is_empty() {
             return Some(AbilityCost::PayEnergy { amount });
         }
+    }
+
+    // CR 107.3a: extract_resolution_unless_pay_modifier lowercased the text; the
+    // case-sensitive X mana symbol no longer matches, so handle bare {x}
+    // explicitly. The announced X of the carrying effect drives the cost.
+    if tag::<_, _, OracleError<'_>>("{x}")
+        .parse(cost_text.trim_start())
+        .is_ok()
+    {
+        return Some(AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
     }
 
     if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(cost_text.trim_start()) {
@@ -16216,6 +16239,52 @@ mod tests {
                         colors: crate::types::ability::DevotionColors::Fixed(
                             vec![ManaColor::Blue,]
                         ),
+                    },
+                },
+            }
+        );
+    }
+
+    /// CR 107.3a + CR 118.12: bare {X} unless-cost on a counter references the
+    /// announced X of the spell carrying the counter — no "where X is" clause.
+    #[test]
+    fn effect_counter_unless_pays_bare_x_uses_announced_variable() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {X}",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }
+        );
+    }
+
+    /// CR 107.3a: resolution-side bare {X} unless-cost (Excise — "Exile target
+    /// attacking creature unless its controller pays {X}"). The mixed-case
+    /// input is lowercased by `extract_resolution_unless_pay_modifier`, so the
+    /// explicit `{x}` arm must recognize it.
+    #[test]
+    fn effect_resolution_unless_pays_bare_x_uses_announced_variable() {
+        let def = parse_effect_chain(
+            "Exile target attacking creature unless its controller pays {X}",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
                     },
                 },
             }

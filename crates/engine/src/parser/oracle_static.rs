@@ -3938,10 +3938,13 @@ struct CombatTaxParse {
 }
 
 /// Subject axis of the combat-tax grammar.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CombatTaxSubject {
-    /// "Creatures [can't attack you]" — applies to opponents' creatures.
-    Creatures,
+    /// "[Color] creatures [can't attack you]" — applies to opponents' creatures.
+    /// CR 105.2: the optional `FilterProp` carries a color predicate
+    /// (`HasColor` for "Red creatures", `NotColor` for "Nonblack creatures" —
+    /// Elephant Grass). `None` is the bare "Creatures" form (Ghostly Prison).
+    Creatures(Option<FilterProp>),
     /// "Enchanted creature [can't attack]" — aura attached-to creature form (Brainwash).
     EnchantedCreature,
     /// CR 122.1: "Each creature with one or more counters on it [can't attack you]"
@@ -3949,26 +3952,34 @@ enum CombatTaxSubject {
     /// creature on the battlefield carrying at least one counter; pairs naturally
     /// with per-affected cost scaling driven by the attacker's counter count.
     EachCreatureWithCounters,
+    /// CR 508.1d / CR 509.1c: "~ can't attack [or block] unless you pay {N} ..."
+    /// — self-referential combat tax on the source permanent itself (Myr
+    /// Prototype, Phyrexian Marauder). The affected filter is `SelfRef`.
+    SourcePermanent,
 }
 
 /// Nom 8.0 parser for the combat-tax body.
 ///
-/// Grammar (case-insensitive, leading "creatures " already consumed by nom):
+/// Grammar (case-insensitive):
 ///   body      := subject restriction scope? " unless " payer mana_cost suffix?
-///   subject   := "creatures "
+///   subject   := color? "creatures " | "enchanted creature "
+///              | "each creature with one or more counters on it " | "~ "
+///   color     := ("non")? ("white"|"blue"|"black"|"red"|"green")
 ///   restriction := "can't attack" | "can't block" | "can't attack or block"
 ///   scope     := " you" | " you or planeswalkers you control"
-///   payer     := "their controller pays " | "its controller pays "
-///   suffix    := " for each of those creatures" dynamic_x?
+///   payer     := "their controller pays " | "its controller pays " | "you pay "
+///   suffix    := " for each ..." dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
 fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     use crate::parser::oracle_nom::error::OracleError;
     use crate::types::ability::UnlessPayScaling;
 
-    // Subject: either "Creatures " (opponents' creatures — the prison family),
-    // "Enchanted creature " (aura form — Brainwash), or "Each creature with one
-    // or more counters on it " (counter-gated form — Nils, Discipline Enforcer).
-    // Each subject type drives the affected-filter shape independently.
+    // Subject: "[color] creatures " (opponents' creatures — the prison family,
+    // optionally narrowed by a color predicate), "enchanted creature " (aura
+    // form — Brainwash), "each creature with one or more counters on it "
+    // (counter-gated form — Nils, Discipline Enforcer), or "~ " (self-referential
+    // tax — Myr Prototype, Phyrexian Marauder). Each subject type drives the
+    // affected-filter shape independently.
     //
     // Order matters: the counter-gated form must be tried before the bare
     // "creatures " tag because the counter phrasing starts with "each" rather
@@ -3979,13 +3990,39 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
             CombatTaxSubject::EachCreatureWithCounters,
             tag_no_case::<_, _, OracleError<'_>>("each creature with one or more counters on it "),
         ),
-        value(
-            CombatTaxSubject::Creatures,
-            tag_no_case::<_, _, OracleError<'_>>("creatures "),
+        // CR 105.2: optional leading color predicate composed as a
+        // single axis before the bare "creatures " tag — "Nonblack creatures"
+        // (Elephant Grass) → NotColor, "Red creatures" → HasColor.
+        map(
+            (
+                opt((
+                    alt((
+                        map(
+                            preceded(
+                                tag_no_case::<_, _, OracleError<'_>>("non"),
+                                nom_primitives::parse_color,
+                            ),
+                            |color| FilterProp::NotColor { color },
+                        ),
+                        map(nom_primitives::parse_color, |color| FilterProp::HasColor {
+                            color,
+                        }),
+                    )),
+                    space1,
+                )),
+                tag_no_case::<_, _, OracleError<'_>>("creatures "),
+            ),
+            |(color, _)| CombatTaxSubject::Creatures(color.map(|(prop, _)| prop)),
         ),
         value(
             CombatTaxSubject::EnchantedCreature,
             tag_no_case::<_, _, OracleError<'_>>("enchanted creature "),
+        ),
+        // CR 508.1d / CR 509.1c: self-referential combat tax — "~ can't attack
+        // [or block] unless you pay ..." (Myr Prototype, Phyrexian Marauder).
+        value(
+            CombatTaxSubject::SourcePermanent,
+            tag::<_, _, OracleError<'_>>("~ "),
         ),
     ))
     .parse(input)?;
@@ -4029,6 +4066,9 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     let (input, _) = alt((
         tag_no_case::<_, _, OracleError<'_>>("their controller pays "),
         tag_no_case::<_, _, OracleError<'_>>("its controller pays "),
+        // CR 508.1d / CR 509.1c: "~ can't attack unless you pay ..." — the
+        // source permanent's controller is the payer (Myr Prototype).
+        tag_no_case::<_, _, OracleError<'_>>("you pay "),
     ))
     .parse(input)?;
 
@@ -4074,10 +4114,12 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     //     choose not to pay..." implying the static targets opponents in practice, but the
     //     rules text is controller-agnostic ("Each creature with one or more counters...").
     let affected = match subject {
-        CombatTaxSubject::Creatures => TargetFilter::Typed(TypedFilter {
+        // CR 105.2: opponents' creatures, optionally narrowed by a
+        // color predicate ("Nonblack creatures" → NotColor, etc.).
+        CombatTaxSubject::Creatures(color_prop) => TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: Some(ControllerRef::Opponent),
-            properties: vec![],
+            properties: color_prop.into_iter().collect(),
         }),
         CombatTaxSubject::EnchantedCreature => TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
@@ -4089,6 +4131,8 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
             controller: None,
             properties: vec![FilterProp::HasAnyCounter],
         }),
+        // CR 508.1d / CR 509.1c: the source permanent itself (Myr Prototype).
+        CombatTaxSubject::SourcePermanent => TargetFilter::SelfRef,
     };
 
     // CR 118.12a: Scaling selection.
@@ -17660,6 +17704,70 @@ mod tests {
             panic!("expected TypedFilter");
         };
         assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+    }
+
+    /// CR 105.2: Elephant Grass — color-prefixed subject
+    /// ("Nonblack creatures"). The affected filter gains a `NotColor`
+    /// predicate while keeping the opponents'-creatures scope and
+    /// `PerAffectedCreature` scaling.
+    #[test]
+    fn combat_tax_color_prefixed_subject_nonblack() {
+        let def = parse_static_line(
+            "Nonblack creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+        )
+        .expect("Elephant Grass combat-tax line should parse");
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        let affected = def.affected.as_ref().expect("affected filter must be set");
+        let TargetFilter::Typed(tf) = affected else {
+            panic!("expected TypedFilter, got {affected:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(tf.properties.contains(&FilterProp::NotColor {
+            color: ManaColor::Black,
+        }));
+        let (cost, scaling) = extract_unless_pay(&def);
+        assert_eq!(cost.mana_value(), 2);
+        assert!(matches!(scaling, UnlessPayScaling::PerAffectedCreature));
+    }
+
+    /// CR 508.1d / CR 509.1c: Myr Prototype — self-referential combat tax
+    /// ("~ can't attack or block unless you pay {1} for each +1/+1 counter on
+    /// it"). Parses to `CantAttackOrBlock` + `SelfRef` filter + `PerQuantityRef`
+    /// scaling against the source's +1/+1 counters.
+    #[test]
+    fn combat_tax_self_ref_subject_you_pay_per_counter() {
+        let def = parse_static_line(
+            "~ can't attack or block unless you pay {1} for each +1/+1 counter on it.",
+        )
+        .expect("Myr Prototype combat-tax line should parse");
+        assert_eq!(def.mode, StaticMode::CantAttackOrBlock);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        let (cost, scaling) = extract_unless_pay(&def);
+        assert_eq!(cost.mana_value(), 1);
+        match scaling {
+            UnlessPayScaling::PerQuantityRef {
+                quantity:
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        ..
+                    },
+            } => {}
+            other => panic!("expected PerQuantityRef CountersOn(Source), got {other:?}"),
+        }
+    }
+
+    /// CR 508.1d: Phyrexian Marauder — self-referential attack-only tax with
+    /// the "you pay" payer.
+    #[test]
+    fn combat_tax_self_ref_subject_cant_attack_only() {
+        let def =
+            parse_static_line("~ can't attack unless you pay {1} for each +1/+1 counter on it.")
+                .expect("Phyrexian Marauder combat-tax line should parse");
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        let (_cost, scaling) = extract_unless_pay(&def);
+        assert!(matches!(scaling, UnlessPayScaling::PerQuantityRef { .. }));
     }
 
     /// CR 506.3 + CR 508.1d: Propaganda — `defended` field captures the

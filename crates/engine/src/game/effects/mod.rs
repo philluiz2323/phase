@@ -1960,13 +1960,12 @@ pub fn resolve_ability_chain(
             // payment site only handles static AbilityCost variants.
             let resolved_cost = match &unless_pay.cost {
                 AbilityCost::ManaDynamic { quantity } => {
-                    // CR 107.1b: Read the caster-chosen X via the ability's
-                    // resolution context.
-                    let amount = crate::game::quantity::resolve_quantity(
-                        state,
-                        quantity,
-                        ability.controller,
-                        ability.source_id,
+                    // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
+                    // X drives the unless-cost. The plain resolve_quantity path
+                    // passes chosen_x=None, making a bare {X} unless-cost always
+                    // resolve to 0 and wrongly short-circuit via CR 118.5.
+                    let amount = crate::game::quantity::resolve_quantity_with_targets(
+                        state, quantity, ability,
                     );
                     AbilityCost::Mana {
                         cost: ManaCost::generic(amount.max(0) as u32),
@@ -3772,6 +3771,66 @@ mod tests {
             resolve_unless_payer(&state, &ability, &TargetFilter::ParentTargetController),
             Some(PlayerId(1))
         );
+    }
+
+    /// CR 107.3a: a bare `{X}` unless-cost (`ManaDynamic` with `Variable("X")`)
+    /// must resolve against the carrying ability's announced `chosen_x`. The
+    /// interceptor folds the dynamic cost into a fixed `Mana` cost before
+    /// arming `WaitingFor::UnlessPayment` — without threading `chosen_x` the
+    /// value resolves to 0 and the unless prompt is wrongly skipped (CR 118.5).
+    #[test]
+    fn unless_pay_bare_x_threads_chosen_x_into_resolved_cost() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+        ability.unless_pay = Some(crate::types::ability::UnlessPayModifier {
+            cost: AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            payer: TargetFilter::ParentTargetController,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    *cost,
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(3),
+                    }
+                );
+            }
+            other => panic!("expected WaitingFor::UnlessPayment, got {other:?}"),
+        }
     }
 
     #[test]
