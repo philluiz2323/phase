@@ -15199,6 +15199,172 @@ mod tests {
         );
     }
 
+    /// Issue #419 regression: an AI-driven escape cast from the graveyard must
+    /// route through `CastingVariant::Escape` and pay BOTH the escape mana cost
+    /// and the exile-five-other-cards additional cost. This drives the real
+    /// `candidate_actions` generator and the real `apply` pipeline end-to-end —
+    /// the AI emits a plain `GameAction::CastSpell` (the action carries no
+    /// `variant_override` field; the engine derives the variant itself), so the
+    /// escape cost can never be bypassed by an AI-supplied override.
+    ///
+    /// CR 702.138a: Escape is a static ability that functions while the card is
+    /// in a graveyard. CR 601.2f/601.2h: the total cost (alternative escape mana
+    /// cost + the exile additional cost) must be determined and paid.
+    #[test]
+    fn ai_escape_cast_from_graveyard_pays_mana_and_exiles_five_cards() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+
+        // A Phlage-shaped escape card in the AI player's (PlayerId(1))
+        // graveyard. Native `Keyword::Escape` with cost {R}{R}{W}{W} and
+        // exile_count 5, mirroring Phlage, Titan of Fire's Fury.
+        let phlage = create_object(
+            &mut state,
+            CardId(9419),
+            PlayerId(1),
+            "Phlage, Titan of Fire's Fury".to_string(),
+            Zone::Graveyard,
+        );
+        let escape_mana = ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+                ManaCostShard::White,
+                ManaCostShard::White,
+            ],
+        };
+        {
+            let obj = state.objects.get_mut(&phlage).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Red, ManaCostShard::White],
+            };
+            let escape_kw = Keyword::Escape {
+                cost: escape_mana.clone(),
+                exile_count: 5,
+            };
+            obj.base_keywords.push(escape_kw.clone());
+            obj.keywords.push(escape_kw);
+        }
+
+        // Five OTHER cards in the AI's graveyard to pay the exile cost.
+        let mut filler_ids = Vec::new();
+        for idx in 0..5u64 {
+            let filler = create_object(
+                &mut state,
+                CardId(9500 + idx),
+                PlayerId(1),
+                format!("Filler {idx}"),
+                Zone::Graveyard,
+            );
+            let obj = state.objects.get_mut(&filler).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            filler_ids.push(filler);
+        }
+
+        // Give the AI exactly {R}{R}{W}{W} in its mana pool.
+        add_mana(&mut state, PlayerId(1), ManaType::Red, 2);
+        add_mana(&mut state, PlayerId(1), ManaType::White, 2);
+
+        // It is the AI player's turn with priority.
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.layers_dirty = true;
+
+        // The engine derives `CastingVariant::Escape` with no override.
+        let prepared = prepare_spell_cast(&state, PlayerId(1), phlage).unwrap();
+        assert_eq!(
+            prepared.casting_variant,
+            CastingVariant::Escape,
+            "graveyard escape card must resolve to CastingVariant::Escape"
+        );
+        assert_eq!(
+            prepared.mana_cost, escape_mana,
+            "escape cast must use the escape mana cost, not free / native cost"
+        );
+
+        // The AI legal-action generator offers the escape cast as a plain
+        // CastSpell — and the GameAction has no variant_override field, so the
+        // AI cannot inject a `Normal` variant that would bypass escape costs.
+        let legal = crate::ai_support::legal_actions(&state);
+        let cast_action = legal
+            .iter()
+            .find(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == phlage))
+            .cloned()
+            .expect("AI legal actions must include the escape cast as a CastSpell");
+
+        let pool_before = state.players[1].mana_pool.total();
+        assert_eq!(pool_before, 4, "AI pool seeded with {{R}}{{R}}{{W}}{{W}}");
+
+        // Drive the AI-emitted action through the real `apply` pipeline.
+        let result = apply_as_current(&mut state, cast_action)
+            .expect("AI escape cast must enter the casting pipeline");
+
+        // The escape additional cost (exile five other graveyard cards) is
+        // enforced — the cast pauses for the exile selection.
+        let (legal_cards, count) = match result.waiting_for {
+            WaitingFor::ExileForCost {
+                zone: ExileCostSourceZone::Graveyard,
+                count,
+                ref cards,
+                ..
+            } => (cards.clone(), count),
+            other => {
+                panic!("escape cast must require exiling cards from the graveyard, got {other:?}")
+            }
+        };
+        assert_eq!(count, 5, "Phlage escape exiles 5 other graveyard cards");
+        assert!(
+            !legal_cards.contains(&phlage),
+            "the escape card itself is not a legal exile choice"
+        );
+
+        // The AI selects the five filler cards to pay the exile cost.
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: filler_ids.clone(),
+            },
+        )
+        .expect("paying the escape exile cost must succeed");
+
+        // After the full cast: the escape mana cost was paid (pool emptied),
+        // the five other cards are in exile, and Phlage is on the stack.
+        assert_eq!(
+            state.players[1].mana_pool.total(),
+            0,
+            "escape mana cost {{R}}{{R}}{{W}}{{W}} must be deducted from the pool"
+        );
+        for filler in &filler_ids {
+            assert_eq!(
+                state.objects.get(filler).unwrap().zone,
+                Zone::Exile,
+                "each of the 5 escape-cost cards must be exiled"
+            );
+        }
+        assert_eq!(
+            state.objects.get(&phlage).unwrap().zone,
+            Zone::Stack,
+            "Phlage must be on the stack after a fully-paid escape cast"
+        );
+        assert!(
+            state.stack.iter().any(|item| item.id == phlage),
+            "Phlage spell must be on the stack"
+        );
+        assert!(
+            matches!(result.waiting_for, WaitingFor::Priority { .. }),
+            "after the escape cast resolves into the stack, priority is passed"
+        );
+    }
+
     #[test]
     fn granted_escape_requires_exile_cost_payment() {
         let mut state = setup_game_at_main_phase();
