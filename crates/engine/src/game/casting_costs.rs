@@ -3429,10 +3429,15 @@ fn score_combination(
 /// cost is actually payable after the player commits an X value.
 ///
 /// When `object_id` is `Some`, the spell's tap-payment keywords (Convoke,
-/// Waterbend, Improvise) are accounted for: each eligible permanent that could
-/// be tapped to pay a generic mana raises the cap by one. This is required for
-/// X-spells with these keywords (CR 601.2b: X is announced before payment, so
-/// the cap must already reflect tap capacity per CR 702.126a/702.51a).
+/// Waterbend, Improvise) are accounted for. CR 110.5 + CR 110.5c: a permanent
+/// has exactly one tapped/untapped status and retains it until changed, so each
+/// untapped permanent is a single tap unit. CR 118.3: a player can't pay a cost
+/// without the resources. A permanent that is both a mana source and
+/// tap-keyword-eligible can therefore serve only ONE channel — so each
+/// permanent contributes `max(mana yield, tap-keyword yield)`, never the sum.
+/// This is required for X-spells with these keywords (CR 601.2b: X is announced
+/// before payment, so the cap must already reflect tap capacity per
+/// CR 702.126a/702.51a).
 ///
 /// CR 601.2b + CR 601.2f: X is announced as part of determining total cost,
 /// before mana is paid.
@@ -3466,49 +3471,57 @@ pub fn max_x_value(
         .find(|p| p.id == player)
         .map_or(0, |p| p.mana_pool.total() as u32);
 
-    // CR 107.1b: Sum each producer's *actual* mana output. Counting producers
-    // as one mana apiece understated X for multi-mana sources (Sol Ring,
-    // bounce lands, `{T}: Add {C} for each ~`), capping the X chooser below
-    // what the caster could truly pay.
-    let producible: u32 = state
-        .battlefield
-        .iter()
-        .map(|&id| mana_sources::max_mana_yield(state, id, player))
-        .sum();
-
     // CR 702.126a / 702.51a: tap-payment keywords (Improvise/Convoke/Waterbend)
-    // let the caster pay generic mana by tapping permanents. Each eligible
-    // permanent raises the affordable X by one.
-    let tap_capacity: u32 = object_id.map_or(0, |oid| {
-        let effective_keywords = super::casting::effective_spell_keywords(state, player, oid);
-        let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> =
+    // let the caster pay generic mana by tapping permanents. The eligibility
+    // predicate is spell-level (not per-object), so resolve it once here.
+    let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> =
+        object_id.and_then(|oid| {
+            let effective_keywords = super::casting::effective_spell_keywords(state, player, oid);
             if effective_keywords
                 .iter()
                 .any(|k| matches!(k, Keyword::Improvise))
             {
-                Some(super::game_object::GameObject::is_improvise_eligible)
+                Some(super::game_object::GameObject::is_improvise_eligible as _)
             } else if effective_keywords
                 .iter()
                 .any(|k| matches!(k, Keyword::Convoke))
             {
-                Some(super::game_object::GameObject::is_convoke_eligible)
+                Some(super::game_object::GameObject::is_convoke_eligible as _)
             } else if effective_keywords
                 .iter()
                 .any(|k| matches!(k, Keyword::Waterbend))
             {
-                Some(super::game_object::GameObject::is_waterbend_eligible)
+                Some(super::game_object::GameObject::is_waterbend_eligible as _)
             } else {
                 None
-            };
-        pred.map_or(0, |p| {
-            state.objects.values().filter(|o| p(o, player)).count() as u32
+            }
+        });
+
+    // CR 110.5 + CR 110.5c + CR 118.3: each untapped permanent is a single tap
+    // unit. CR 702.126a / 702.51a: a tap-payment keyword (Improvise/Convoke/
+    // Waterbend) taps a permanent "rather than pay that mana" — so a permanent
+    // that is both a mana source and tap-keyword-eligible can serve only ONE
+    // channel, not both. Partition per object: each contributes
+    // max(mana yield, tap-keyword yield), never the sum, or the X cap inflates
+    // above what the caster can actually pay. CR 107.1b: `max_mana_yield`
+    // reports a producer's full output (Sol Ring, bounce lands) so multi-mana
+    // sources are not understated.
+    let capacity: u32 = state
+        .battlefield
+        .iter()
+        .map(|&id| {
+            let mana = mana_sources::max_mana_yield(state, id, player);
+            let tap = pred
+                .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
+                .map_or(0, |_| 1);
+            mana.max(tap)
         })
-    });
+        .sum();
 
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let remaining = (pool + producible + tap_capacity).saturating_sub(fixed_portion);
+    let remaining = (pool + capacity).saturating_sub(fixed_portion);
     remaining / x_count
 }
 
@@ -7279,6 +7292,232 @@ battlefield, then shuffle.";
                 "improvise-tapped artifact must be tapped"
             );
         }
+    }
+
+    /// Build a `{T}: Add <count> colorless` activated mana ability — the shape
+    /// of a mana-dork (`{T}: Add {G}`) or a mana-rock (`{T}: Add {C}{C}`).
+    fn tap_mana_ability(count: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: crate::types::ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: count },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+    }
+
+    /// Issue #490 follow-up — reverted-fix discriminator (Convoke + mana-dorks).
+    /// CR 110.5 + CR 110.5c + CR 702.51a: a creature tapped for Convoke cannot
+    /// also be tapped for its mana ability. With 2 Islands + 3 mana-dorks
+    /// (`{T}: Add {C}`), each dork is a single tap unit — `max(mana 1, tap 1)`.
+    /// True max X for a Convoke `{X}{U}` = 2 Islands + 3 dorks − {U} = 4.
+    /// Pre-fix the producible term (5) and the tap_capacity term (3) were summed
+    /// → `(0 + 5 + 3) - 1 = 7`, an unpayable X. With the partition fix it is 4.
+    #[test]
+    fn max_x_value_convoke_does_not_double_count_mana_dorks() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // 2 Islands — pure mana sources, not Convoke-eligible.
+        scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        // 3 mana-dorks — creatures (Convoke-eligible) that also produce mana.
+        for i in 0..3 {
+            let mut b = scenario.add_creature(PlayerId(0), &format!("Mana Dork {i}"), 1, 1);
+            b.with_ability_definition(tap_mana_ability(1));
+        }
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Convoke X-Spell", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        builder.with_keyword(Keyword::Convoke);
+
+        let runner = scenario.build();
+        let state = runner.state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 0,
+        };
+
+        assert_eq!(
+            max_x_value(state, PlayerId(0), &cost, Some(spell_id)),
+            4,
+            "Convoke must not double-count mana-dorks (pre-fix: 7)"
+        );
+    }
+
+    /// Issue #490 follow-up — reverted-fix discriminator (Improvise + mana-rock).
+    /// CR 702.126a: an artifact tapped for Improvise cannot also be tapped for
+    /// its mana ability. Board: 1 Island + 1 Sol-Ring-like artifact
+    /// (`{T}: Add {C}{C}`). For an Improvise `{X}`, the artifact is a single tap
+    /// unit → `max(mana 2, improvise 1) = 2`; Island contributes 1.
+    /// True max X = 3. Pre-fix: producible (1 + 2 = 3) + tap_capacity (1) = 4.
+    #[test]
+    fn max_x_value_improvise_does_not_double_count_mana_rocks() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        // Sol-Ring-like artifact: untapped, Improvise-eligible, `{T}: Add {C}{C}`.
+        let mut rock = scenario.add_creature(PlayerId(0), "Sol Ring", 0, 0);
+        rock.as_artifact();
+        rock.with_ability_definition(tap_mana_ability(2));
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Improvise X-Spell", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        builder.with_keyword(Keyword::Improvise);
+
+        let runner = scenario.build();
+        let state = runner.state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        };
+
+        assert_eq!(
+            max_x_value(state, PlayerId(0), &cost, Some(spell_id)),
+            3,
+            "Improvise must not double-count a mana-rock (pre-fix: 4)"
+        );
+    }
+
+    /// Issue #490 follow-up — Waterbend overlap. Waterbend is eligible on
+    /// artifacts OR creatures, so a mana-rock satisfies both the mana and the
+    /// tap-keyword channels. Board: 1 Island + 1 artifact (`{T}: Add {C}{C}`).
+    /// Waterbend `{X}` → artifact is one tap unit (`max(2, 1) = 2`),
+    /// Island 1 → max X = 3. Proves the partition is keyword-general.
+    #[test]
+    fn max_x_value_waterbend_does_not_double_count() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        let mut rock = scenario.add_creature(PlayerId(0), "Waterbend Rock", 0, 0);
+        rock.as_artifact();
+        rock.with_ability_definition(tap_mana_ability(2));
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Waterbend X-Spell", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        builder.with_keyword(Keyword::Waterbend);
+
+        let runner = scenario.build();
+        let state = runner.state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        };
+
+        assert_eq!(
+            max_x_value(state, PlayerId(0), &cost, Some(spell_id)),
+            3,
+            "Waterbend must not double-count an overlapping mana-rock"
+        );
+    }
+
+    /// Issue #490 follow-up — runtime end-to-end. The X chooser's offered `max`
+    /// for a Convoke X-spell cast alongside mana-dorks must be fully payable
+    /// through the pipeline. Mirrors `whir_of_invention_improvise_allows_full_x`
+    /// but with a board where the mana/tap overlap exists. CR 601.2f: X is
+    /// announced before payment, so the offered cap must be honest.
+    #[test]
+    fn convoke_x_spell_offers_payable_x_with_mana_dork_overlap() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::GameAction;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // 1 Island + 2 mana-dorks (creatures with `{T}: Add {C}`).
+        let island = scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        let dorks: Vec<ObjectId> = (0..2)
+            .map(|i| {
+                let mut b = scenario.add_creature(PlayerId(0), &format!("Mana Dork {i}"), 1, 1);
+                b.with_ability_definition(tap_mana_ability(1));
+                b.id()
+            })
+            .collect();
+
+        // Convoke X-spell `{X}{U}` — no overlap means max X would be 2;
+        // the partition keeps it at 2 (Island + 2 dorks − {U}).
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Convoke X-Spell", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        builder.with_keyword(Keyword::Convoke);
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell_id].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the Convoke X-spell must be accepted");
+
+        let offered_max = match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        };
+        assert_eq!(
+            offered_max, 2,
+            "partitioned cap: Island + 2 dorks − {{U}} = 2 (pre-fix: 3)"
+        );
+
+        runner
+            .act(GameAction::ChooseX { value: offered_max })
+            .expect("choosing the offered max X must be accepted");
+
+        // Pay the {U} with the Island.
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: island,
+                ability_index: 0,
+            })
+            .expect("tapping the Island for {U} must be accepted");
+        // Pay the {2} generic by Convoke-tapping the 2 dorks.
+        for &dork in &dorks {
+            runner
+                .act(GameAction::TapForConvoke {
+                    object_id: dork,
+                    mana_type: ManaType::Colorless,
+                })
+                .expect("Convoke-tapping a mana-dork must be accepted");
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("finalizing payment must be accepted");
+
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the Convoke X-spell must be on the stack — offered max X was payable"
+        );
     }
 
     // -----------------------------------------------------------------------
