@@ -198,6 +198,159 @@ describe("fetchCardImageUrl", () => {
   });
 });
 
+describe("fetchTokenImageUrl — ability-aware printing selection (issue #502)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A Scryfall token-search response whose first hit is a vanilla 1/1 Human.
+  function makeTokenSearchResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        data: [{
+          name: "Human Token",
+          keywords: [],
+          image_uris: { normal: "https://img.example/vanilla-human.jpg" },
+        }],
+        total_cards: 1,
+        has_more: false,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  function make404(): Response {
+    return new Response("", { status: 404 });
+  }
+
+  // Decode every captured search URL's `q=` query string. The first fetch
+  // call is always the local Scryfall-data load; search calls follow.
+  function capturedQueries(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    return fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes("/cards/search?"))
+      .map((u) => decodeURIComponent(new URL(u).searchParams.get("q") ?? ""));
+  }
+
+  it("Test 1 — a vanilla token query carries is:vanilla", async () => {
+    const fetchMock = vi
+      .fn()
+      // Token-less local data map — forces the API path (no `token:human` key).
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      .mockResolvedValue(makeTokenSearchResponse());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    await fetchTokenImageUrl("Human", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Human"],
+      hasAbilities: false,
+    });
+
+    const queries = capturedQueries(fetchMock);
+    expect(queries.length).toBeGreaterThan(0);
+    expect(queries[0]).toContain("is:vanilla");
+  });
+
+  it("Test 2 — is:vanilla is added only when hasAbilities === false", async () => {
+    // Each sub-case re-loads the module so the module-level `loadScryfallData`
+    // cache is reset and the leading empty-card-data fetch is consumed afresh.
+
+    // hasAbilities: false → query contains is:vanilla.
+    {
+      const { fetchTokenImageUrl } = await loadScryfallModule();
+      const falseMock = vi
+        .fn()
+        .mockResolvedValueOnce(makeEmptyCardDataMap())
+        .mockResolvedValue(makeTokenSearchResponse());
+      global.fetch = falseMock;
+      await fetchTokenImageUrl("Human", "normal", {
+        power: 1, toughness: 1, colors: ["White"], subtypes: ["Human"],
+        hasAbilities: false,
+      });
+      expect(capturedQueries(falseMock)[0]).toContain("is:vanilla");
+    }
+
+    // hasAbilities: true (e.g. a Spirit with flying) → NO is:vanilla.
+    {
+      const { fetchTokenImageUrl } = await loadScryfallModule();
+      const trueMock = vi
+        .fn()
+        .mockResolvedValueOnce(makeEmptyCardDataMap())
+        .mockResolvedValue(makeTokenSearchResponse());
+      global.fetch = trueMock;
+      await fetchTokenImageUrl("Spirit", "normal", {
+        power: 1, toughness: 1, colors: ["White"], subtypes: ["Spirit"],
+        hasAbilities: true,
+      });
+      const queries = capturedQueries(trueMock);
+      expect(queries.length).toBeGreaterThan(0);
+      for (const q of queries) {
+        expect(q).not.toContain("is:vanilla");
+      }
+    }
+
+    // hasAbilities omitted (preview / no-GameObject path) → NO is:vanilla.
+    {
+      const { fetchTokenImageUrl } = await loadScryfallModule();
+      const undefMock = vi
+        .fn()
+        .mockResolvedValueOnce(makeEmptyCardDataMap())
+        .mockResolvedValue(makeTokenSearchResponse());
+      global.fetch = undefMock;
+      await fetchTokenImageUrl("Human", "normal", {
+        power: 1, toughness: 1, colors: ["White"], subtypes: ["Human"],
+      });
+      const queries = capturedQueries(undefMock);
+      expect(queries.length).toBeGreaterThan(0);
+      for (const q of queries) {
+        expect(q).not.toContain("is:vanilla");
+      }
+    }
+  });
+
+  it("Test 3 — a vanilla-narrowed query resolves to a vanilla printing", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      .mockResolvedValue(makeTokenSearchResponse());
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Human", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Human"],
+      hasAbilities: false,
+    });
+
+    expect(url).toBe("https://img.example/vanilla-human.jpg");
+  });
+
+  it("Test 4 — a 404 on the first is:vanilla rung advances to the next rung", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      // First (narrowest) is:vanilla rung 404s — an empty Scryfall search.
+      .mockResolvedValueOnce(make404())
+      // The next relaxed rung yields the vanilla hit.
+      .mockResolvedValue(makeTokenSearchResponse());
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Human", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Human"],
+      hasAbilities: false,
+    });
+
+    expect(url).toBe("https://img.example/vanilla-human.jpg");
+  });
+});
+
 describe("rateLimitedFetch (token/search API)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

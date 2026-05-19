@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
+import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CardImage } from "../card/CardImage.tsx";
 
 // Hard cap on how many mini-cards the peek will render. At 88×123 with an
@@ -144,6 +145,7 @@ export function BattlefieldPeekPopover({
                   cardName={obj.name}
                   size="small"
                   isToken={obj.display_source === "Token"}
+                  tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined}
                 />
               </div>
               {pt && (

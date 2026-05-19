@@ -4,7 +4,7 @@ import { memo, useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
@@ -528,7 +528,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       ) : (
         <>
           <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color, subtypes: obj.card_types.subtypes } : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip
@@ -699,7 +699,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color, subtypes: obj.card_types.subtypes } : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
       )}
     </div>
   );

@@ -1,3 +1,4 @@
+import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getKeywordName } from "../../viewmodel/keywordProps.ts";
@@ -91,6 +92,7 @@ export function IncomingAttackersPopover({
                   cardName={obj.name}
                   size="small"
                   isToken={obj.display_source === "Token"}
+                  tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined}
                 />
               </div>
               {pt && (

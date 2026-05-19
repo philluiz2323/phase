@@ -4,7 +4,7 @@ import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -42,7 +42,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken: obj?.face_down ? false : isToken,
-    tokenFilters: !obj?.face_down && isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color, subtypes: obj?.card_types?.subtypes } : undefined,
+    tokenFilters: !obj?.face_down && isToken && obj ? tokenFiltersForObject(obj) : undefined,
     oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
     faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });

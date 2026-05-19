@@ -148,6 +148,7 @@ function imageRequestKey(
   filterToughness: number | null,
   filterColors: string,
   filterSubtypes: string,
+  filterHasAbilities: boolean | null,
   oracleId: string,
   faceName: string,
 ): string {
@@ -160,6 +161,7 @@ function imageRequestKey(
     filterToughness ?? "",
     filterColors,
     filterSubtypes,
+    String(filterHasAbilities),
   ].join("|");
 }
 
@@ -182,6 +184,7 @@ async function acquireCachedImageSrc(
   filterToughness: number | null,
   filterColors: string,
   filterSubtypes: string,
+  filterHasAbilities: boolean | null,
   oracleId: string,
   faceName: string,
 ): Promise<string | null> {
@@ -207,6 +210,7 @@ async function acquireCachedImageSrc(
         toughness: filterToughness,
         colors: filterColors ? filterColors.split(",") : undefined,
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
+        hasAbilities: filterHasAbilities ?? undefined,
       });
     } else if (oracleId) {
       remoteSrc = await fetchCardImageByOracleId(oracleId, faceName, size);
@@ -243,6 +247,7 @@ export function useCardImage(
   const filterToughness = tokenFilters?.toughness ?? null;
   const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
+  const filterHasAbilities = tokenFilters?.hasAbilities ?? null;
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
@@ -296,6 +301,7 @@ export function useCardImage(
     filterToughness,
     filterColors,
     filterSubtypes,
+    filterHasAbilities,
     oracleId,
     faceName,
   );
@@ -330,6 +336,7 @@ export function useCardImage(
           filterToughness,
           filterColors,
           filterSubtypes,
+          filterHasAbilities,
           oracleId,
           faceName,
         );
@@ -355,6 +362,7 @@ export function useCardImage(
     faceIndex,
     faceName,
     filterColors,
+    filterHasAbilities,
     filterPower,
     filterSubtypes,
     filterToughness,

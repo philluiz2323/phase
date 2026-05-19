@@ -5,6 +5,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
+import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -124,7 +125,7 @@ function CardPreviewInner({
     size: "normal",
     faceIndex: defaultFaceIndex,
     isToken,
-    tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color, subtypes: obj?.card_types?.subtypes } : undefined,
+    tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     scryfallId,

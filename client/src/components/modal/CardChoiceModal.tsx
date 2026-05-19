@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
@@ -65,7 +65,7 @@ function objectImageProps(obj: GameObject) {
     oracleId,
     faceName,
     isToken,
-    tokenFilters: isToken ? { power: obj.power, toughness: obj.toughness, colors: obj.color, subtypes: obj.card_types?.subtypes } : undefined,
+    tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
   };
 }
 

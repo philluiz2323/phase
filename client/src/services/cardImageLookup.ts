@@ -1,4 +1,5 @@
 import type { GameObject } from "../adapter/types.ts";
+import type { TokenSearchFilters } from "./scryfall.ts";
 
 /**
  * Image-lookup descriptor for a battlefield game object.
@@ -68,4 +69,25 @@ export function cardImageLookup(
     };
   }
   return { name: obj.name, faceIndex: 0 };
+}
+
+/**
+ * Build the Scryfall token-search filters for an engine game object.
+ *
+ * `hasAbilities` is derived purely from engine-provided fields — no rules
+ * inference. A vanilla token (e.g. a 1/1 white Human from Wedding Announcement)
+ * yields `hasAbilities: false`, narrowing art selection to a vanilla printing;
+ * a Spirit token with flying yields `true`. See issue #502.
+ */
+export function tokenFiltersForObject(obj: GameObject): TokenSearchFilters {
+  return {
+    power: obj.power,
+    toughness: obj.toughness,
+    colors: obj.color,
+    subtypes: obj.card_types?.subtypes,
+    hasAbilities:
+      obj.keywords.length > 0 ||
+      obj.abilities.length > 0 ||
+      (obj.token_rules_text?.length ?? 0) > 0,
+  };
 }

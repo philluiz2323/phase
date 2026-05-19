@@ -364,6 +364,12 @@ export interface TokenSearchFilters {
   /// so `t:goblin t:warrior` narrows; the ladder below relaxes it
   /// progressively when narrow queries miss.
   subtypes?: string[];
+  /** Whether the engine token carries any abilities (keywords, granted
+   *  abilities, or printed rules text). When false, the Scryfall query is
+   *  narrowed with `is:vanilla` so an ability-less engine token resolves to a
+   *  vanilla printing — never an arbitrary same-shape printing that carries
+   *  extra abilities (e.g. a Doctor Who 1/1 Human token with Ward 2). */
+  hasAbilities?: boolean;
 }
 
 export async function fetchTokenImageUrl(
@@ -386,6 +392,15 @@ export async function fetchTokenImageUrl(
   //   3. Drop subtypes entirely.
   //   4. Drop P/T (existing fallback shape).
   // Each step relaxes exactly one axis. Stop at the first non-empty hit.
+  //
+  // When the engine token has no abilities (`hasAbilities === false`), every
+  // rung above is narrowed with `is:vanilla`, and a single terminal
+  // last-resort rung — identical shape to the widest rung but WITHOUT
+  // `is:vanilla` — is appended. That guarantees a vanilla token resolves to a
+  // vanilla printing whenever one exists, while still degrading gracefully (to
+  // pre-fix behavior) for a token type whose only printings carry abilities,
+  // rather than producing no image at all. See issue #502.
+  const vanillaOnly = filters?.hasAbilities === false;
   const queries: string[] = [];
   for (let n = subtypes.length; n >= 0; n--) {
     queries.push(
@@ -395,11 +410,20 @@ export async function fetchTokenImageUrl(
         filters?.toughness,
         colorClause,
         subtypes.slice(0, n),
+        vanillaOnly,
       ),
     );
   }
   if (filters?.power != null || filters?.toughness != null) {
-    queries.push(buildTokenQuery(tokenName, null, null, colorClause, []));
+    queries.push(
+      buildTokenQuery(tokenName, null, null, colorClause, [], vanillaOnly),
+    );
+  }
+  if (vanillaOnly) {
+    // Terminal last-resort rung: same shape as the widest rung, `is:vanilla`
+    // dropped. Reached only when no vanilla printing of any relaxed shape
+    // matched — degrades to pre-fix behavior instead of a missing image.
+    queries.push(buildTokenQuery(tokenName, null, null, colorClause, [], false));
   }
 
   for (const query of queries) {
@@ -433,6 +457,7 @@ function buildTokenQuery(
   toughness: number | null | undefined,
   colorClause: string,
   subtypes: string[],
+  vanillaOnly: boolean,
 ): string {
   let query = `t:token !"${name}"`;
   if (power != null) query += ` pow=${power}`;
@@ -444,6 +469,12 @@ function buildTokenQuery(
     // creature types from supplemental sets).
     query += ` t:"${s.toLowerCase()}"`;
   }
+  // `is:vanilla` (a documented Scryfall predicate — a card with no abilities)
+  // narrows the search to ability-less printings so an ability-less engine
+  // token never resolves to an arbitrary same-shape printing carrying extra
+  // abilities. The caller decides per-rung whether it applies — the terminal
+  // last-resort rung deliberately drops it. See issue #502.
+  if (vanillaOnly) query += ` is:vanilla`;
   return query;
 }
 
