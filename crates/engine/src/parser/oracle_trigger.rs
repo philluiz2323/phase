@@ -62,6 +62,44 @@ fn filter_references_self(filter: &TargetFilter) -> bool {
     }
 }
 
+fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+            {
+                typed.properties.push(FilterProp::Owned { controller });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| with_owner_scope(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| with_owner_scope(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(with_owner_scope(*filter, controller)),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::Owned { controller }]),
+                ),
+            ],
+        },
+    }
+}
+
 fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinition) -> Option<Zone> {
     match ability.effect.as_ref() {
         crate::types::ability::Effect::ChangeZone {
@@ -4608,6 +4646,28 @@ fn try_parse_event(
         }
     }
 
+    // CR 701.24: "shuffles their library" / "shuffles" — shuffle trigger
+    if let Ok((tail, _)) = pair(
+        alt((tag::<_, _, OracleError<'_>>("shuffles"), tag("shuffle"))),
+        opt(preceded(
+            space1,
+            alt((
+                tag("their library"),
+                tag("his or her library"),
+                tag("your library"),
+                tag("a library"),
+            )),
+        )),
+    )
+    .parse(rest)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Shuffled;
+        def.valid_target = Some(subject.clone());
+        attach_event_timing_tail(&mut def, tail);
+        return Some((TriggerMode::Shuffled, def));
+    }
+
     // Simple event verbs using nom alt() — each maps to a single TriggerMode
     // These are all "is_some()" pattern strip_prefix calls
     #[derive(Clone)]
@@ -5556,7 +5616,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
 
         // Parse subject type filter: "creature cards", "artifact and/or creature cards", "cards"
         let filter = if subject_text == "cards" {
-            None
+            TargetFilter::Typed(TypedFilter::card())
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
             // Handle "artifact and/or creature" → OR filter
             if scan_contains(type_text, "and/or") {
@@ -5573,7 +5633,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                     })
                     .collect();
                 if filters.len() == parts.len() && filters.len() > 1 {
-                    Some(TargetFilter::Or { filters })
+                    TargetFilter::Or { filters }
                 } else {
                     continue;
                 }
@@ -5582,7 +5642,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                 if !remainder.trim().is_empty() {
                     continue;
                 }
-                Some(filter)
+                filter
             }
         } else {
             continue;
@@ -5591,7 +5651,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.origin = Some(Zone::Graveyard);
-        def.valid_card = filter;
+        def.valid_card = Some(with_owner_scope(filter, ControllerRef::You));
         def.batched = true;
         // LTB-from-graveyard triggers need to fire from graveyard zone context
         def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
@@ -6661,7 +6721,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
         ),
-        ("whenever a player ", None),
+        (
+            "whenever each opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("whenever a player ", Some(TargetFilter::Player)),
         ("when you ", Some(TargetFilter::Controller)),
         (
             "when an opponent ",
@@ -6669,7 +6735,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
         ),
-        ("when a player ", None),
+        (
+            "when each opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("when a player ", Some(TargetFilter::Player)),
     ] {
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
@@ -6694,6 +6766,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
             [PlayerActionKind::CollectEvidence] => {
                 def.mode = TriggerMode::CollectEvidence;
                 return Some((TriggerMode::CollectEvidence, def));
+            }
+            // CR 701.24a: Shuffle — player-action trigger, scoped by
+            // valid_target so "you", "an opponent", and "a player" forms all
+            // use the same matcher path.
+            [PlayerActionKind::ShuffledLibrary] => {
+                def.mode = TriggerMode::Shuffled;
+                return Some((TriggerMode::Shuffled, def));
             }
             _ => {
                 def.mode = TriggerMode::PlayerPerformedAction;
@@ -6730,6 +6809,13 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
         // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
         "collect evidence" | "collects evidence" => Some(PlayerActionKind::CollectEvidence),
+        "shuffle your library"
+        | "shuffles their library"
+        | "shuffle their library"
+        | "shuffles his or her library"
+        | "shuffle his or her library"
+        | "shuffles a library"
+        | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
         _ => None,
     }
 }
@@ -8421,6 +8507,24 @@ mod tests {
                 },
             }),
             offset: -1,
+        }
+    }
+
+    fn assert_owned_by_you(filter: &TargetFilter) {
+        match filter {
+            TargetFilter::Typed(typed) => assert!(
+                typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
+                "expected Owned(You) property in {typed:?}"
+            ),
+            TargetFilter::Or { filters } => {
+                assert!(!filters.is_empty(), "expected non-empty Or filter");
+                for filter in filters {
+                    assert_owned_by_you(filter);
+                }
+            }
+            other => panic!("expected Typed or Or filter, got {other:?}"),
         }
     }
 
@@ -14153,7 +14257,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert!(def.valid_card.is_some());
+        assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
     }
 
     #[test]
@@ -14165,7 +14269,12 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert_eq!(def.valid_card, None); // no type filter — "cards"
+        let filter = def.valid_card.as_ref().expect("valid_card");
+        assert_owned_by_you(filter);
+        assert!(
+            matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Card]),
+            "expected card filter for unqualified cards, got {filter:?}"
+        );
     }
 
     #[test]
@@ -14177,6 +14286,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
+        assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
     }
 
@@ -14216,7 +14326,9 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert!(matches!(def.valid_card, Some(TargetFilter::Or { .. })));
+        let filter = def.valid_card.as_ref().expect("valid_card");
+        assert!(matches!(filter, TargetFilter::Or { .. }));
+        assert_owned_by_you(filter);
     }
 
     // ── Work Item 2: Discard Batch Triggers ───────────────────────
@@ -16296,6 +16408,42 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Fight);
         assert!(def.valid_card.is_some());
+    }
+
+    #[test]
+    fn trigger_player_shuffles_library_scopes_actor_as_valid_target() {
+        let def = parse_trigger_line(
+            "Whenever an opponent shuffles their library, put a +1/+1 counter on this creature.",
+            "Cosi's Trickster",
+        );
+        assert_eq!(def.mode, TriggerMode::Shuffled);
+        assert_eq!(def.valid_card, None);
+        assert!(matches!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn trigger_player_shuffles_library_sibling_phrases() {
+        let cases = [
+            "Whenever a player shuffles their library, draw a card.",
+            "Whenever each opponent shuffle his or her library, draw a card.",
+            "Whenever you shuffle your library, draw a card.",
+            "Whenever a player shuffles a library, draw a card.",
+        ];
+
+        for text in cases {
+            let def = parse_trigger_line(text, "Test Card");
+            assert_eq!(def.mode, TriggerMode::Shuffled, "{text}");
+            assert!(
+                def.valid_target.is_some(),
+                "shuffle actor must be represented as valid_target for: {text}"
+            );
+        }
     }
 
     // -- StaticCondition → TriggerCondition bridge tests --
