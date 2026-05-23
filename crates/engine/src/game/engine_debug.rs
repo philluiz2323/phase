@@ -376,6 +376,7 @@ pub fn apply_debug_action(
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: owner,
+                attach_to: None,
             };
             let proposed = ProposedEvent::CreateToken {
                 owner,

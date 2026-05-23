@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::DisplaySource;
+use crate::game::game_object::{AttachTarget, DisplaySource};
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
@@ -334,6 +334,7 @@ pub fn resolve(
         fallback_supertypes,
         token_statics,
         etb_counters,
+        attach_to,
     ) = match &ability.effect {
         Effect::Token {
             name,
@@ -345,11 +346,11 @@ pub fn resolve(
             tapped,
             count,
             owner,
+            attach_to,
             enters_attacking,
             supertypes,
             static_abilities,
             enter_with_counters,
-            ..
         } => (
             name.clone(),
             power.clone(),
@@ -364,6 +365,7 @@ pub fn resolve(
             supertypes.clone(),
             static_abilities.clone(),
             enter_with_counters.clone(),
+            attach_to.as_ref(),
         ),
         _ => (
             "Token".to_string(),
@@ -379,9 +381,17 @@ pub fn resolve(
             vec![],
             vec![],
             vec![],
+            None,
         ),
     };
     let token_owner = resolve_token_owner(state, ability, owner_filter);
+
+    // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
+    // time. ParentTarget reads the first Object target (the for-each loop's
+    // per-iteration rebind binds it); Typed/event-context filters resolve via the
+    // shared target/event-context path. `None` for ordinary (unattached) tokens.
+    let attach_target: Option<AttachTarget> =
+        attach_to.and_then(|f| resolve_attach_host(state, ability, f));
 
     // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
     // self-describing `TokenSpec`. Script-name parsing takes precedence;
@@ -420,6 +430,7 @@ pub fn resolve(
         enters_attacking,
         token_statics,
         resolved_etb_counters,
+        attach_target,
         ability,
         state,
     );
@@ -485,6 +496,7 @@ fn build_token_spec(
     enters_attacking: bool,
     static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
+    attach_to: Option<AttachTarget>,
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> crate::types::proposed_event::TokenSpec {
@@ -548,6 +560,7 @@ fn build_token_spec(
         sacrifice_at: ability.duration.clone(),
         source_id: ability.source_id,
         controller: ability.controller,
+        attach_to,
     }
 }
 
@@ -664,6 +677,21 @@ pub fn apply_create_token_after_replacement(
         crate::game::restrictions::record_battlefield_entry(state, obj_id);
         crate::game::restrictions::record_token_created(state, obj_id);
 
+        // CR 303.4 + CR 303.7: A Role/Aura token created "attached to" a host
+        // enters attached. CR 303.4i/303.4g: if the host is illegal/undefined the
+        // attach primitive no-ops and SBA (CR 704.5) moves the unattached Aura to
+        // the graveyard. Single authority: effects::attach.
+        if let Some(host) = &spec.attach_to {
+            match host {
+                AttachTarget::Object(id) => {
+                    super::attach::attach_to(state, obj_id, *id);
+                }
+                AttachTarget::Player(pid) => {
+                    super::attach::attach_to_player(state, obj_id, *pid);
+                }
+            }
+        }
+
         created_ids.push(obj_id);
 
         // CR 111.1 + CR 603.6a: "An object that enters the battlefield as a
@@ -718,6 +746,51 @@ pub fn apply_create_token_after_replacement(
     // CR 603.7: Record created token IDs for sub-abilities that reference
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
+}
+
+/// CR 303.4 + CR 303.4i: Resolve the host an Aura/Role token is created
+/// "attached to" from its `attach_to: TargetFilter`. Mirrors
+/// `attach::resolve_object_filter`'s ParentTarget arm (the first
+/// `TargetRef::Object` in `ability.targets`, which the for-each loop's
+/// per-iteration rebind populates) plus the event-context path. A `Typed`
+/// targeting filter (e.g. "attached to target creature you control") also reads
+/// the chosen target out of `ability.targets`. Returns `None` when no legal
+/// host has been bound — the apply path then leaves the token unattached and
+/// CR 704.5 SBA moves the orphaned Aura to the graveyard.
+///
+/// This does NOT duplicate attach legality: the actual attach is performed by
+/// `attach::attach_to` / `attach::attach_to_player`, the single authority for
+/// CR 701.3a / CR 301.5 / CR 303.4 host validity.
+fn resolve_attach_host(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<AttachTarget> {
+    match filter {
+        // CR 608.2b: Event-context hosts ("attached to the triggering creature").
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+                .map(target_ref_to_attach_target)
+        }
+        // CR 603.7 + CR 109.4: ParentTarget and any targeting filter resolve to
+        // the chosen target carried in `ability.targets`. ParentTarget is bound
+        // per-iteration by the for-each rebind; a `Typed` targeting filter is the
+        // single-target "attached to target creature" case. Both read the first
+        // target slot, preferring the first Object, else the first Player.
+        _ => ability.targets.iter().find_map(|target| match target {
+            TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+            TargetRef::Player(_) => None,
+        }),
+    }
+}
+
+/// Convert a resolved `TargetRef` into an `AttachTarget` host. Player and Object
+/// hosts both reach the apply path (CR 303.4 allows player-host Auras).
+fn target_ref_to_attach_target(target: TargetRef) -> AttachTarget {
+    match target {
+        TargetRef::Object(id) => AttachTarget::Object(id),
+        TargetRef::Player(id) => AttachTarget::Player(id),
+    }
 }
 
 /// CR 109.4 + CR 111.2: Resolve the player who creates (and therefore
@@ -3020,6 +3093,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
+            attach_to: None,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -3076,6 +3150,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
+            attach_to: None,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -3163,6 +3238,87 @@ mod tests {
             state.last_created_token_ids.len(),
             4,
             "batched event: 3 + Xorn's 1 = 4 tokens (the pre-fix per-token loop would give 6)"
+        );
+    }
+
+    // ── attach_to consumption (issue #687 follow-up) ─────────────────────
+
+    /// Build a Role-token `Effect::Token` whose `attach_to` host is supplied by
+    /// `attach_to` and whose `repeat_for` (None for single-target) is set by the
+    /// caller. The Role enters as Enchantment Aura Role per CR 303.7.
+    fn role_token_effect(attach_to: Option<TargetFilter>) -> Effect {
+        Effect::Token {
+            name: "Cursed Role".to_string(),
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            types: vec![
+                "Enchantment".to_string(),
+                "Aura".to_string(),
+                "Role".to_string(),
+            ],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        }
+    }
+
+    fn spawn_creature(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(7),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// CR 303.4: A single-target "Create a Role token attached to target creature
+    /// you control" (Betroth the Beast, Guard Change, etc.) attaches the created
+    /// Role to the chosen target carried in `ability.targets`. Pre-fix the
+    /// `attach_to` field was dropped under `..` and every such token was created
+    /// unattached. The Typed targeting filter resolves to the first Object slot.
+    #[test]
+    fn single_target_role_token_attaches_to_chosen_creature() {
+        let mut state = GameState::new_two_player(42);
+        let creature = spawn_creature(&mut state, PlayerId(0), "Bear");
+
+        let ability = ResolvedAbility::new(
+            role_token_effect(Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::You),
+            ))),
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let role = state.last_created_token_ids[0];
+        assert_eq!(
+            state.objects[&role].attached_to,
+            Some(AttachTarget::Object(creature)),
+            "Role token must enter attached to the chosen creature"
+        );
+        assert!(
+            state.objects[&creature].attachments.contains(&role),
+            "host's attachments list must include the Role"
         );
     }
 }
