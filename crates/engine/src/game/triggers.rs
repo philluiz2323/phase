@@ -735,15 +735,6 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     }
 }
 
-/// CR 603.2 + CR 603.3b: Collect every triggered ability matching `events`,
-/// apply trigger doubling, and return the contexts sorted into APNAP dispatch
-/// order (NAP first / bottom of stack, AP last / top). This is the pure
-/// *collection* half of trigger processing — it never touches
-/// `state.pending_trigger` or `state.waiting_for` and never pushes to the
-/// stack. `process_triggers` composes this with `dispatch_pending_trigger_context`
-/// for the standard path; `collect_triggers_into_deferred` composes it with the
-/// `deferred_triggers` queue for resolution-choice handlers that must collect
-/// without dispatching (issue #423).
 /// CR 101.4 + CR 603.3b: APNAP rank of `controller` for trigger ordering — its
 /// index in the living turn order from the active player (0 = active player,
 /// then each non-active player in turn order). This is the primary key the
@@ -759,6 +750,16 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .unwrap_or(order.len())
 }
 
+/// CR 603.2 + CR 603.3b: Collect every triggered ability matching `events`,
+/// apply trigger doubling, and return the contexts sorted into APNAP stack
+/// placement order (active player first / bottom of stack, then each non-active
+/// player in turn order). This is the pure *collection* half of trigger
+/// processing — it never touches `state.pending_trigger` or `state.waiting_for`
+/// and never pushes to the stack. `process_triggers` composes this with
+/// `dispatch_pending_trigger_context` for the standard path;
+/// `collect_triggers_into_deferred` composes it with the `deferred_triggers`
+/// queue for resolution-choice handlers that must collect without dispatching
+/// (issue #423).
 fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -1835,10 +1836,11 @@ fn collect_pending_triggers(
     // then clone matching pending triggers.
     apply_trigger_doubling(state, &mut pending);
 
-    // CR 603.3b + CR 101.4: Order triggers in full APNAP turn order (active
-    // player, then each non-active player in turn order) — not a binary
-    // active/non-active split, which mis-orders 2+ non-active players in
-    // multiplayer. Within the same controller, order by timestamp.
+    // CR 603.3b + CR 101.4: Stack-placement order is full APNAP turn order
+    // (active player first / lowest on stack, then each non-active player in
+    // turn order) — not a binary active/non-active split, which mis-orders 2+
+    // non-active players in multiplayer. Within the same controller, seed the
+    // ordering prompt by timestamp.
     let apnap = crate::game::players::apnap_order(state);
     pending.sort_by_key(|t| {
         (
@@ -1846,11 +1848,6 @@ fn collect_pending_triggers(
             t.pending.timestamp,
         )
     });
-
-    // Reverse so NAP triggers are placed first (bottom of stack), AP triggers last (top).
-    // CR 603.3b: LIFO means AP triggers resolve last (APNAP ordering).
-    pending.reverse();
-
     pending
 }
 
@@ -2070,7 +2067,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         }
         // No controller has 2+ triggers — dispatch immediately (zero behaviour
         // change for the single-trigger common case). `collect_pending_triggers`
-        // already returned the vec in NAP-first stack-placement order.
+        // already returned the vec in APNAP stack-placement order.
         TriggerOrderingDisposition::NoChoiceNeeded(pending) => {
             dispatch_collected_triggers(state, pending);
             clear_post_collection_transients(state);
@@ -2139,18 +2136,19 @@ enum TriggerOrderingDisposition {
     NoChoiceNeeded(Vec<PendingTriggerContext>),
 }
 
-/// CR 603.3b: Partition `pending` by controller (preserving the NAP-first
+/// CR 603.3b: Partition `pending` by controller (preserving the APNAP
 /// placement order produced by `collect_pending_triggers`), populate
 /// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller,
-/// and return either the first ordering prompt (most-AP unordered group) or
+/// and return either the first ordering prompt (earliest APNAP unordered group) or
 /// `NoChoiceNeeded` when no group requires a choice.
 ///
 /// Choice order vs placement order — the two are intentionally distinct:
 ///   * Placement order (which group sits lower on the stack) is APNAP per
-///     CR 405.3 + 603.3b — NAP-first — and is locked by the input vec.
+///     CR 405.3 + 603.3b — active player first / lowest, then each non-active
+///     player in turn order — and is locked by the input vec.
 ///   * Choice order (which controller is prompted first) is APNAP per
-///     CR 101.4 — active player chooses first — so we prompt the
-///     most-AP unordered group, walking backwards through `groups`.
+///     CR 101.4 — active player chooses first — so we prompt the first
+///     unordered group in the same APNAP order.
 fn begin_trigger_ordering(
     state: &mut GameState,
     pending: Vec<PendingTriggerContext>,
@@ -2256,8 +2254,7 @@ pub fn drain_order_triggers_with_identity(
 }
 
 /// CR 603.3b: Build the next `WaitingFor::OrderTriggers` prompt by finding
-/// the most-AP unordered group (walk groups in reverse — `groups` is NAP-first
-/// placement order, so reverse iteration is AP-first choice order).
+/// the earliest unordered group in APNAP order.
 /// Returns `None` if every group is `ordered` (caller should dispatch).
 fn build_next_order_triggers_prompt(
     state: &GameState,
@@ -2265,7 +2262,7 @@ fn build_next_order_triggers_prompt(
     use crate::types::game_state::{PendingTriggerSummary, WaitingFor};
 
     let order = state.pending_trigger_order.as_ref()?;
-    let group = order.groups.iter().rev().find(|g| !g.ordered)?;
+    let group = order.groups.iter().find(|g| !g.ordered)?;
     let triggers: Vec<PendingTriggerSummary> = group
         .triggers
         .iter()
@@ -2302,8 +2299,8 @@ fn is_valid_permutation(order: &[usize], len: usize) -> bool {
 }
 
 /// CR 603.3b: Apply a player's chosen order to their group, then either emit
-/// the next `OrderTriggers` prompt (next-most-AP unordered group) or — when
-/// every group is ordered — concatenate them in placement order (NAP-first)
+/// the next `OrderTriggers` prompt (next APNAP unordered group) or — when
+/// every group is ordered — concatenate them in APNAP placement order
 /// and dispatch through the standard pipeline. The ordering-vs-input-pause
 /// invariant (issue #531 v2): every group's ordering is fully resolved
 /// *before* any trigger is dispatched, so a trigger that pauses on input
@@ -2321,11 +2318,12 @@ pub(crate) fn handle_order_triggers(
         )
     })?;
 
-    // Locate the most-AP unordered group — same selector as `build_next_order_triggers_prompt`.
+    // Locate the earliest APNAP unordered group — same selector as
+    // `build_next_order_triggers_prompt`.
     let target_idx = pending_order
         .groups
         .iter()
-        .rposition(|g| !g.ordered)
+        .position(|g| !g.ordered)
         .ok_or_else(|| {
             super::engine::EngineError::InvalidAction(
                 "OrderTriggers submitted but every group is already ordered".to_string(),
@@ -2357,7 +2355,7 @@ pub(crate) fn handle_order_triggers(
         return Ok(wf);
     }
 
-    // All groups ordered — concatenate in placement order (NAP-first) and
+    // All groups ordered — concatenate in APNAP placement order and
     // dispatch through the same loop `process_triggers` uses. Reset
     // `state.waiting_for` to Priority before dispatch so the post-dispatch
     // check below correctly detects whether dispatch set a NEW pause state
@@ -3080,11 +3078,11 @@ pub fn check_state_triggers(state: &mut GameState) {
         return;
     }
 
-    // CR 603.3b + CR 101.4: Full APNAP turn order for state triggers (active
-    // player, then each non-active player in turn order), tiebroken by timestamp.
+    // CR 603.3b + CR 101.4: Full APNAP stack-placement order for state triggers
+    // (active player lowest, then each non-active player in turn order),
+    // tiebroken by timestamp.
     let apnap = crate::game::players::apnap_order(state);
     pending.sort_by_key(|t| (apnap_rank(&apnap, t.controller), t.timestamp));
-    pending.reverse();
 
     let mut events_out = Vec::new();
     for trigger in pending {
@@ -3133,14 +3131,13 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 
     let mut new_events = Vec::new();
 
-    // CR 603.3b + CR 101.4: Full APNAP turn order — active player's triggers go
-    // on the stack last (resolve first), then each non-active player in turn
-    // order. The old `state.turn_number` tiebreaker was constant across this
-    // batch, so dropping it changes nothing; `sort_by_key` is stable, preserving
-    // the prior same-controller ordering.
+    // CR 603.3b + CR 101.4: Full APNAP stack-placement order — active player's
+    // triggers go lowest, then each non-active player's triggers in turn order.
+    // The old `state.turn_number` tiebreaker was constant across this batch, so
+    // dropping it changes nothing; `sort_by_key` is stable, preserving the
+    // prior same-controller ordering before stack placement.
     let apnap = crate::game::players::apnap_order(state);
     to_fire.sort_by_key(|(trigger, _)| apnap_rank(&apnap, trigger.controller));
-    to_fire.reverse();
 
     for (trigger, trigger_event) in to_fire {
         let pending = PendingTrigger {
@@ -5693,15 +5690,15 @@ pub mod tests {
         // Both triggers should be on the stack
         assert_eq!(state.stack.len(), 2);
 
-        // AP (P0) triggers should be on top of stack (resolve last = placed last)
-        // NAP (P1) triggers should be on bottom (resolve first = placed first)
+        // AP (P0) triggers are placed first, so they are lowest on the stack;
+        // NAP (P1) triggers are placed after them and resolve first.
         let top = &state.stack[state.stack.len() - 1];
         let bottom = &state.stack[0];
-        assert_eq!(top.controller, PlayerId(0), "AP trigger should be on top");
+        assert_eq!(top.controller, PlayerId(1), "NAP trigger should be on top");
         assert_eq!(
             bottom.controller,
-            PlayerId(1),
-            "NAP trigger should be on bottom"
+            PlayerId(0),
+            "AP trigger should be on bottom"
         );
     }
 
@@ -17038,7 +17035,7 @@ mod dedup_regression_tests {
     /// active/non-active sort key that lumped every non-active player into one
     /// timestamp-ordered bucket: here P0's source is older than P2's, so the old
     /// key placed P0 before P2 by timestamp, but turn order from active P1 is
-    /// P1, P2, P0, so P2 must precede P0.
+    /// P1, P2, P0, so P2 must be lower on the stack than P0.
     #[test]
     fn order_triggers_apnap_two_nonactive_players_use_turn_order() {
         let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 123);
@@ -17072,24 +17069,23 @@ mod dedup_regression_tests {
             state.waiting_for
         );
 
-        // Turn order from active P1 is P1, P2, P0. The engine places the
-        // latest-in-turn-order controller first (stack index 0) and walks toward
-        // the active player, so the turn-order-correct stack is [P0, P2]. The old
-        // binary key ordered the two NAPs by timestamp instead, yielding [P2, P0].
+        // Turn order from active P1 is P1, P2, P0. The engine stores the stack
+        // bottom-to-top, so P2 is lower and P0 is above it. The old binary key
+        // ordered the two NAPs by timestamp instead, yielding [P0, P2].
         let stack_sources = stack_source_ids(&state);
         assert_eq!(stack_sources.len(), 2, "both triggers reach the stack");
         assert_eq!(
             stack_sources,
-            vec![p0, p2],
-            "non-active players must be ordered by turn order (P2 before P0), not timestamp"
+            vec![p2, p0],
+            "non-active players must be placed by turn order (P2 below P0), not timestamp"
         );
     }
 
     /// CR 603.3b + CR 101.4 + CR 405.3: In a 3-player game with both AP and
     /// NAP controlling 2 simultaneous triggers each, the active player is
     /// prompted FIRST (CR 101.4 — APNAP choice order), then each NAP in turn
-    /// order. The final stack reflects the placement order (NAP-first =
-    /// bottom of stack) per CR 405.3.
+    /// order. The final stack reflects the placement order (AP first = bottom
+    /// of stack) per CR 405.3.
     #[test]
     fn order_triggers_apnap_three_players() {
         let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 123);
@@ -17146,23 +17142,23 @@ mod dedup_regression_tests {
         )
         .expect("P1 submits");
 
-        // Now all four triggers must be on the stack; NAP's pair must be
-        // placed FIRST (bottom of stack per CR 405.3 + 603.3b APNAP).
+        // Now all four triggers must be on the stack; AP's pair must be placed
+        // FIRST (bottom of stack per CR 405.3 + 603.3b APNAP).
         let stack_sources = stack_source_ids(&state);
         assert_eq!(stack_sources.len(), 4, "four triggers on the stack");
-        // Bottom two are the NAP (P1)'s pair; top two are AP (P0)'s pair.
+        // Bottom two are the AP (P0)'s pair; top two are the NAP (P1)'s pair.
         let p1_ids = [p1_a, p1_b];
         let p0_ids = [p0_a, p0_b];
         for id in &stack_sources[0..2] {
             assert!(
-                p1_ids.contains(id),
-                "stack bottom must contain NAP triggers (CR 405.3 + 603.3b)"
+                p0_ids.contains(id),
+                "stack bottom must contain AP triggers (CR 405.3 + 603.3b)"
             );
         }
         for id in &stack_sources[2..4] {
             assert!(
-                p0_ids.contains(id),
-                "stack top must contain AP triggers (CR 405.3 + 603.3b)"
+                p1_ids.contains(id),
+                "stack top must contain NAP triggers (CR 405.3 + 603.3b)"
             );
         }
     }
