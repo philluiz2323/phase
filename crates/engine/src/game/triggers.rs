@@ -744,6 +744,21 @@ pub(super) fn resolve_tap_mana_triggers_inline(
 /// for the standard path; `collect_triggers_into_deferred` composes it with the
 /// `deferred_triggers` queue for resolution-choice handlers that must collect
 /// without dispatching (issue #423).
+/// CR 101.4 + CR 603.3b: APNAP rank of `controller` for trigger ordering — its
+/// index in the living turn order from the active player (0 = active player,
+/// then each non-active player in turn order). This is the primary key the
+/// simultaneous-trigger sorts must use: a binary "active vs non-active" key
+/// collapses every non-active player into one bucket and cannot order two or
+/// more of them by turn order. Controllers not in the living order (e.g. an
+/// eliminated player) sort after all living players. In a two-player game the
+/// rank is 0/1, identical to the old binary key, so nothing regresses there.
+fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
+    order
+        .iter()
+        .position(|p| *p == controller)
+        .unwrap_or(order.len())
+}
+
 fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -1820,15 +1835,16 @@ fn collect_pending_triggers(
     // then clone matching pending triggers.
     apply_trigger_doubling(state, &mut pending);
 
-    // CR 603.3b: Active player's triggers are ordered before non-active player's triggers.
-    // Within same controller, order by timestamp.
+    // CR 603.3b + CR 101.4: Order triggers in full APNAP turn order (active
+    // player, then each non-active player in turn order) — not a binary
+    // active/non-active split, which mis-orders 2+ non-active players in
+    // multiplayer. Within the same controller, order by timestamp.
+    let apnap = crate::game::players::apnap_order(state);
     pending.sort_by_key(|t| {
-        let is_nap = if t.pending.controller == state.active_player {
-            0
-        } else {
-            1
-        };
-        (is_nap, t.pending.timestamp)
+        (
+            apnap_rank(&apnap, t.pending.controller),
+            t.pending.timestamp,
+        )
     });
 
     // Reverse so NAP triggers are placed first (bottom of stack), AP triggers last (top).
@@ -3064,15 +3080,10 @@ pub fn check_state_triggers(state: &mut GameState) {
         return;
     }
 
-    // CR 603.3b: APNAP ordering for state triggers.
-    pending.sort_by_key(|t| {
-        let is_nap = if t.controller == state.active_player {
-            0
-        } else {
-            1
-        };
-        (is_nap, t.timestamp)
-    });
+    // CR 603.3b + CR 101.4: Full APNAP turn order for state triggers (active
+    // player, then each non-active player in turn order), tiebroken by timestamp.
+    let apnap = crate::game::players::apnap_order(state);
+    pending.sort_by_key(|t| (apnap_rank(&apnap, t.controller), t.timestamp));
     pending.reverse();
 
     let mut events_out = Vec::new();
@@ -3122,16 +3133,13 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 
     let mut new_events = Vec::new();
 
-    // CR 603.3b: APNAP ordering — active player's triggers go on stack last (resolve first).
-    // Sort so NAP triggers come first (pushed to stack bottom), AP triggers last (stack top).
-    to_fire.sort_by_key(|(trigger, _)| {
-        let is_nap = if trigger.controller == state.active_player {
-            0
-        } else {
-            1
-        };
-        (is_nap, state.turn_number)
-    });
+    // CR 603.3b + CR 101.4: Full APNAP turn order — active player's triggers go
+    // on the stack last (resolve first), then each non-active player in turn
+    // order. The old `state.turn_number` tiebreaker was constant across this
+    // batch, so dropping it changes nothing; `sort_by_key` is stable, preserving
+    // the prior same-controller ordering.
+    let apnap = crate::game::players::apnap_order(state);
+    to_fire.sort_by_key(|(trigger, _)| apnap_rank(&apnap, trigger.controller));
     to_fire.reverse();
 
     for (trigger, trigger_event) in to_fire {
@@ -16987,6 +16995,59 @@ mod dedup_regression_tests {
             state.stack.len(),
             1,
             "the single trigger reaches the stack directly"
+        );
+    }
+
+    /// CR 603.3b + CR 101.4: With the active player NOT in seat 0, two
+    /// non-active players' simultaneous triggers must be placed in turn order
+    /// from the active player — not by timestamp. Regression for the binary
+    /// active/non-active sort key that lumped every non-active player into one
+    /// timestamp-ordered bucket: here P0's source is older than P2's, so the old
+    /// key placed P0 before P2 by timestamp, but turn order from active P1 is
+    /// P1, P2, P0, so P2 must precede P0.
+    #[test]
+    fn order_triggers_apnap_two_nonactive_players_use_turn_order() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 123);
+        // Active player is P1 (seat 1) — the case the binary key gets wrong.
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.phase = Phase::Upkeep;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        // One trigger each for two non-active players, so neither is prompted to
+        // order and both reach the stack directly. P0's source is OLDER than
+        // P2's, so a timestamp-based NAP ordering would place P0 first.
+        let p2 = make_phase_trigger_source(&mut state, PlayerId(2), "P2 Source", 1);
+        let p0 = make_phase_trigger_source(&mut state, PlayerId(0), "P0 Source", 1);
+        state.objects.get_mut(&p0).unwrap().entered_battlefield_turn = Some(1);
+        state.objects.get_mut(&p2).unwrap().entered_battlefield_turn = Some(2);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        // Neither player controls 2+ triggers, so there is no ordering prompt.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "single trigger per player must not prompt; got {:?}",
+            state.waiting_for
+        );
+
+        // Turn order from active P1 is P1, P2, P0. The engine places the
+        // latest-in-turn-order controller first (stack index 0) and walks toward
+        // the active player, so the turn-order-correct stack is [P0, P2]. The old
+        // binary key ordered the two NAPs by timestamp instead, yielding [P2, P0].
+        let stack_sources = stack_source_ids(&state);
+        assert_eq!(stack_sources.len(), 2, "both triggers reach the stack");
+        assert_eq!(
+            stack_sources,
+            vec![p0, p2],
+            "non-active players must be ordered by turn order (P2 before P0), not timestamp"
         );
     }
 
