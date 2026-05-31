@@ -6124,9 +6124,10 @@ pub mod tests {
         process_triggers(&mut state, &events);
 
         assert_eq!(state.stack.len(), 2);
-        // APNAP: AP (P0) on top, NAP (P1) on bottom
-        assert_eq!(state.stack[state.stack.len() - 1].controller, PlayerId(0));
-        assert_eq!(state.stack[0].controller, PlayerId(1));
+        // CR 603.3b: AP triggers are placed first, so they are lower on the
+        // stack; NAP triggers are placed after them and resolve first.
+        assert_eq!(state.stack[state.stack.len() - 1].controller, PlayerId(1));
+        assert_eq!(state.stack[0].controller, PlayerId(0));
     }
 
     #[test]
