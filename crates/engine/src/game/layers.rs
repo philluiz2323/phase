@@ -1763,6 +1763,10 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
 fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
+            if obj.counters.is_empty() {
+                continue;
+            }
+
             let (power_delta, toughness_delta) = obj.counters.iter().fold(
                 (0i32, 0i32),
                 |(power_total, toughness_total), (counter_type, count)| {
