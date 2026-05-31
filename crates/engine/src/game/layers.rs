@@ -1112,8 +1112,8 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 4: Process each remaining layer in order
     for (layer, layer_bucket) in &effects_by_layer {
-        if matches!(*layer, Layer::Copy | Layer::CounterPT) {
-            // Copy handled above; Counter-based P/T handled separately below.
+        if *layer == Layer::Copy {
+            // Copy is handled above, before this loop.
             continue;
         }
 
@@ -1129,6 +1129,14 @@ pub fn evaluate_layers(state: &mut GameState) {
             for effect in &ordered {
                 apply_continuous_effect(state, effect);
             }
+        }
+
+        // CR 613.4c: P/T counters modify power/toughness in layer 7c. Counters
+        // are object state, not continuous effects, so the `CounterPT` bucket is
+        // empty and the fold runs here — after the 7c `+N/+N` effects above and
+        // before the 7d `SwitchPT` (CR 613.4d) handled in a later iteration.
+        if *layer == Layer::CounterPT {
+            apply_pt_counter_modifications(state, bf_ids.iter().copied());
         }
 
         if *layer == Layer::Type {
@@ -1187,35 +1195,12 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
-    // CR 613.4c: Power/toughness counters modify P/T in layer 7c.
+    // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
+    // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
+    // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
+    // before the 7d switch.)
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            let (power_delta, toughness_delta) = obj.counters.iter().fold(
-                (0i32, 0i32),
-                |(power_total, toughness_total), (counter_type, count)| {
-                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
-                        return (power_total, toughness_total);
-                    };
-                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
-                    (
-                        power_total.saturating_add(power.saturating_mul(count)),
-                        toughness_total.saturating_add(toughness.saturating_mul(count)),
-                    )
-                },
-            );
-            if power_delta != 0 {
-                if let Some(ref mut p) = obj.power {
-                    *p = saturating_pt_add(*p, power_delta);
-                }
-            }
-            if toughness_delta != 0 {
-                if let Some(ref mut t) = obj.toughness {
-                    *t = saturating_pt_add(*t, toughness_delta);
-                }
-            }
-
-            // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
-            // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
             }
@@ -1676,7 +1661,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     // Step 3-4: Remaining layers in order, restricted to entered objects.
     let effects_by_layer = gather_active_continuous_effects(state);
     for (layer, layer_bucket) in &effects_by_layer {
-        if matches!(*layer, Layer::Copy | Layer::CounterPT) {
+        if *layer == Layer::Copy {
             continue;
         }
         if !layer_bucket.is_empty() {
@@ -1689,6 +1674,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             for effect in &ordered {
                 apply_continuous_effect_to(state, effect, entered_ids);
             }
+        }
+        // CR 613.4c: P/T counters modify power/toughness in layer 7c, before the
+        // 7d switch (CR 613.4d). The CounterPT bucket carries no continuous
+        // effects, so fold the on-object counters in here.
+        if *layer == Layer::CounterPT {
+            apply_pt_counter_modifications(state, entered_ids.iter().copied());
         }
         if *layer == Layer::Type {
             let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
@@ -1718,8 +1709,9 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     }
 
     // CR 122.1b + CR 613.1f: Keyword counters grant their keyword (Layer 6).
-    // CR 613.4c: Power/toughness counters modify P/T (Layer 7c). CR 306.5c:
-    // loyalty re-derives from loyalty counters. Per-entered fixups only.
+    // CR 306.5c: loyalty re-derives from loyalty counters. Per-entered fixups
+    // only. (P/T counters are applied in-loop at Layer::CounterPT above, in
+    // layer 7c before the 7d switch — CR 613.4c/613.4d.)
     for &id in entered_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             let granted: Vec<Keyword> = obj
@@ -1736,29 +1728,6 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                 }
             }
 
-            let (power_delta, toughness_delta) = obj.counters.iter().fold(
-                (0i32, 0i32),
-                |(power_total, toughness_total), (counter_type, count)| {
-                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
-                        return (power_total, toughness_total);
-                    };
-                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
-                    (
-                        power_total.saturating_add(power.saturating_mul(count)),
-                        toughness_total.saturating_add(toughness.saturating_mul(count)),
-                    )
-                },
-            );
-            if power_delta != 0 {
-                if let Some(ref mut p) = obj.power {
-                    *p = saturating_pt_add(*p, power_delta);
-                }
-            }
-            if toughness_delta != 0 {
-                if let Some(ref mut t) = obj.toughness {
-                    *t = saturating_pt_add(*t, toughness_delta);
-                }
-            }
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
             }
@@ -1783,6 +1752,42 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .into_iter()
         .filter(|effect| effect.layer == layer)
         .collect()
+}
+
+/// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
+/// layer 7c. Counters are object state rather than continuous effects, so this
+/// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
+/// effects and before the 7d power/toughness switch (CR 613.4d). Applying it
+/// after the switch would transpose asymmetric P/T counters (e.g. `+0/+1`,
+/// `-1/-0`) onto the wrong axis.
+fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            let (power_delta, toughness_delta) = obj.counters.iter().fold(
+                (0i32, 0i32),
+                |(power_total, toughness_total), (counter_type, count)| {
+                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
+                        return (power_total, toughness_total);
+                    };
+                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
+                    (
+                        power_total.saturating_add(power.saturating_mul(count)),
+                        toughness_total.saturating_add(toughness.saturating_mul(count)),
+                    )
+                },
+            );
+            if power_delta != 0 {
+                if let Some(ref mut p) = obj.power {
+                    *p = saturating_pt_add(*p, power_delta);
+                }
+            }
+            if toughness_delta != 0 {
+                if let Some(ref mut t) = obj.toughness {
+                    *t = saturating_pt_add(*t, toughness_delta);
+                }
+            }
+        }
+    }
 }
 
 /// Collect all active continuous effects from permanents on the battlefield.
@@ -3889,6 +3894,49 @@ mod tests {
         let obj = &state.objects[&id];
         assert_eq!(obj.power, Some(3));
         assert_eq!(obj.toughness, Some(2));
+    }
+
+    /// CR 613.4c + CR 613.4d: P/T counters (layer 7c) must be applied BEFORE the
+    /// power/toughness switch (layer 7d). With an asymmetric counter the two
+    /// orders diverge — applying the counter after the switch transposes it onto
+    /// the wrong axis. Regression for the inversion that placed counters in a
+    /// fictional "layer 7e" after the switch (engine returned 2/3 instead of 3/2).
+    #[test]
+    fn pt_counters_apply_before_switch_in_layer_seven() {
+        let mut state = setup();
+        // Base 2/2 so the only P/T asymmetry comes from the counter.
+        let id = make_creature(&mut state, "Switch Host", 2, 2, PlayerId(0));
+
+        let switch = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SwitchPowerToughness]);
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.counters.insert(
+                CounterType::PowerToughness {
+                    power: 0,
+                    toughness: 1,
+                },
+                1,
+            );
+            Arc::make_mut(&mut obj.base_static_definitions).push(switch.clone());
+            obj.static_definitions.push(switch);
+        }
+
+        evaluate_layers(&mut state);
+
+        // 7c counter first: 2/2 -> 2/3. Then 7d switch: 2/3 -> 3/2.
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.power,
+            Some(3),
+            "power must be the post-counter toughness"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "toughness must be the post-counter power"
+        );
     }
 
     #[test]
