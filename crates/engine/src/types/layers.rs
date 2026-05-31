@@ -68,6 +68,7 @@ impl Layer {
                 | Layer::Ability
                 | Layer::CharDef
                 | Layer::SetPT
+                | Layer::ModifyPT
         )
     }
 }
@@ -203,7 +204,7 @@ mod tests {
         assert!(Layer::Copy.has_dependency_ordering());
         assert!(Layer::Type.has_dependency_ordering());
         assert!(Layer::Ability.has_dependency_ordering());
-        assert!(!Layer::ModifyPT.has_dependency_ordering());
+        assert!(Layer::ModifyPT.has_dependency_ordering());
         assert!(!Layer::SwitchPT.has_dependency_ordering());
         assert!(!Layer::CounterPT.has_dependency_ordering());
     }
