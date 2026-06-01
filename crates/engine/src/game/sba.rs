@@ -1314,6 +1314,16 @@ fn is_valid_attachment_target(
     let Some(target) = state.objects.get(&target_id) else {
         return false;
     };
+    // CR 702.16c/d + CR 701.3: protection acquired by the host, or a
+    // `CantBeAttached`/`CantBeEnchanted`/`CantBeEquipped` static, makes the host
+    // an illegal attachment target — the attachment must detach as an SBA even
+    // though the Enchant filter / zone below may still match. This is the "E" of
+    // DEBT for the continuously-acquired case (Mother of Runes freeing a
+    // creature from an opponent's Pacifism).
+    if crate::game::effects::attach::attachment_illegality(state, attacher_id, target_id).is_some()
+    {
+        return false;
+    }
     let enchant_filter = attacher.keywords.iter().find_map(|k| match k {
         crate::types::keywords::Keyword::Enchant(f) => Some(f),
         _ => None,
@@ -1912,6 +1922,145 @@ mod tests {
         // Equipment should still be on battlefield but unattached
         assert!(state.battlefield.contains(&equip_id));
         assert_eq!(state.objects.get(&equip_id).unwrap().attached_to, None);
+    }
+
+    #[test]
+    fn sba_aura_detaches_when_host_gains_protection() {
+        // CR 702.16c + CR 704.5m: a creature enchanted by an opponent's white
+        // Aura (Pacifism) that gains protection from white (Mother of Runes) →
+        // the Aura is put into its owner's graveyard as a state-based action.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.color.push(crate::types::mana::ManaColor::White);
+            obj.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+        // Host gains protection from white.
+        state.objects.get_mut(&creature).unwrap().keywords.push(
+            crate::types::keywords::Keyword::Protection(
+                crate::types::keywords::ProtectionTarget::Color(
+                    crate::types::mana::ManaColor::White,
+                ),
+            ),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5m: the now-illegal Aura leaves the battlefield (to graveyard).
+        assert!(
+            !state.battlefield.contains(&aura),
+            "an Aura on a host that gained protection must detach (CR 702.16c / 704.5m)"
+        );
+    }
+
+    #[test]
+    fn sba_equipment_unattaches_when_host_gains_protection_from_artifacts() {
+        // CR 702.16d + CR 704.5n: an equipped creature that gains protection
+        // from artifacts → the Equipment unattaches but stays on the battlefield.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let equip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sword".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equip).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(equip);
+        state.objects.get_mut(&creature).unwrap().keywords.push(
+            crate::types::keywords::Keyword::Protection(
+                // `source_matches_card_type` matches the lowercase type word
+                // (the form the parser stores for "protection from artifacts").
+                crate::types::keywords::ProtectionTarget::CardType("artifact".to_string()),
+            ),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5n: Equipment stays on the battlefield, but unattached.
+        assert!(
+            state.battlefield.contains(&equip),
+            "Equipment stays on the battlefield (CR 704.5n)"
+        );
+        assert_eq!(
+            state.objects.get(&equip).unwrap().attached_to,
+            None,
+            "Equipment must unattach from a host that gained protection from artifacts"
+        );
+    }
+
+    #[test]
+    fn sba_legal_aura_stays_attached() {
+        // Regression guard: an Aura on a legal host (no protection / prohibition)
+        // is not detached by the SBA re-check.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&aura),
+            "a legal Aura must remain attached"
+        );
+        assert_eq!(
+            state.objects.get(&aura).unwrap().attached_to,
+            Some(creature.into())
+        );
     }
 
     #[test]
