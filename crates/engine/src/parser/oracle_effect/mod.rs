@@ -26099,7 +26099,7 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26107,7 +26107,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected GrantCastingPermission(PlayFromExile, UntilYourNextTurn), got {:?}",
+            "Expected GrantCastingPermission(PlayFromExile, UntilEndOfNextTurnOf), got {:?}",
             def.effect
         );
     }
@@ -26124,7 +26124,7 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26132,7 +26132,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn), got {:?}",
+            "Expected PlayFromExile(UntilEndOfNextTurnOf), got {:?}",
             def.effect
         );
     }
@@ -26148,7 +26148,7 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26156,7 +26156,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn), got {:?}",
+            "Expected PlayFromExile(UntilEndOfNextTurnOf), got {:?}",
             def.effect
         );
     }
@@ -26187,7 +26187,7 @@ mod tests {
                 *sub.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26198,7 +26198,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn) on TrackedSet(0), got {:?}",
+            "Expected PlayFromExile(UntilEndOfNextTurnOf) on TrackedSet(0), got {:?}",
             sub.effect
         );
     }

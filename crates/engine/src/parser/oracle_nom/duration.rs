@@ -15,12 +15,21 @@ use crate::types::ability::{Duration, PlayerScope};
 
 /// Parse a duration phrase from Oracle text.
 ///
-/// Matches "until end of turn", "until your next turn", "until end of combat",
-/// "for as long as [condition]", "this turn".
+/// Matches "until end of turn", "until the end of your next turn", "until your
+/// next turn", "until end of combat", "for as long as [condition]", "this turn".
 pub fn parse_duration(input: &str) -> OracleResult<'_, Duration> {
     alt((
         value(Duration::UntilEndOfTurn, tag("until end of turn")),
         value(Duration::UntilEndOfCombat, tag("until end of combat")),
+        // CR 514.2: "until the end of your next turn" persists through the whole
+        // next turn (cleanup), distinct from "until your next turn" (begin of
+        // next turn). Match the longer phrase first so it isn't shadowed.
+        value(
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            tag("until the end of your next turn"),
+        ),
         value(
             Duration::UntilNextTurnOf {
                 player: PlayerScope::Controller,

@@ -1643,7 +1643,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag(" until the end of your next turn"),
@@ -1655,7 +1655,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
                 tag(" until your next turn"),
             ),
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag(" until the end of their next turn"),

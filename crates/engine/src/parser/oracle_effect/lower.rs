@@ -2080,7 +2080,7 @@ pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
         alt((
             value(Duration::UntilEndOfTurn, tag("until end of turn, ")),
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag("until the end of your next turn, "),
@@ -2133,7 +2133,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         (" until end of turn", Duration::UntilEndOfTurn),
         (
             " until the end of your next turn",
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
         ),
@@ -2146,7 +2146,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         // the end of the grantee's next turn" at prune time.
         (
             " until the end of their next turn",
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
         ),
