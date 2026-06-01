@@ -4669,8 +4669,6 @@ mod tests {
         // Before the fix the prevention shield classified `Disjoint` (its
         // `execute`/`damage_modification` are unset), so the set was deemed
         // immaterial and the CR 616.1 order prompt was skipped.
-        use crate::types::ability::{DamageModification, PreventionAmount};
-
         let mut state = GameState::new_two_player(42);
         let mut furnace = GameObject::new(
             ObjectId(10),
