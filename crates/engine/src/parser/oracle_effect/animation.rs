@@ -553,11 +553,10 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
 }
 
 /// Split `input` on the " in addition to {its/their/his/her} other
-/// [creature ]types" marker,
-/// returning the prefix and the matched marker variant. Returns `None` if the
-/// marker is absent. Uses `take_until` to locate the marker, then a nom `alt`
-/// to select between the two CR 205.3 variants (creature-types form is the
-/// longer alternative and listed first per nom short-circuit semantics).
+/// [creature ]types" marker, returning the prefix and the matched marker
+/// variant. Returns `None` if the marker is absent. Uses `take_until` to
+/// locate the marker, then [`parse_in_addition_other_types_marker`] to consume
+/// and recognize the variant.
 fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     type VE<'a> = OracleError<'a>;
     let (_, prefix) =
@@ -568,28 +567,41 @@ fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     Some((prefix, matched))
 }
 
+/// nom combinator: match the full "in addition to {its/their/his/her} other
+/// [creature ]types" marker. The two independent axes — possessive pronoun and
+/// type scope (all "types" vs only "creature types") — are composed as a single
+/// `alt` and a single `opt`, not enumerated as the 4×2 = 8 `tag` cross product.
+/// See `oracle_nom/PATTERNS.md` §8 ("compose, don't enumerate permutations").
+/// `recognize` returns the consumed slice, preserving the matched-marker
+/// semantics callers rely on. `opt(tag("creature "))` makes the scope axis
+/// order-independent — no "longest alternative first" ordering footgun.
 fn parse_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
-    alt((
-        tag("in addition to its other creature types"),
-        tag("in addition to their other creature types"),
-        tag("in addition to his other creature types"),
-        tag("in addition to her other creature types"),
-        tag("in addition to its other types"),
-        tag("in addition to their other types"),
-        tag("in addition to his other types"),
-        tag("in addition to her other types"),
+    recognize((
+        tag("in addition to "),
+        alt((tag("its"), tag("their"), tag("his"), tag("her"))),
+        tag(" other "),
+        opt(tag("creature ")),
+        tag("types"),
     ))
+    .parse(input)
+}
+
+/// nom combinator: locate the marker anywhere in `input`, skipping preceding
+/// text. Named rather than inlined into [`has_in_addition_to_other_types`] so
+/// lifetime elision binds the parser's borrow to the `input` parameter;
+/// inlining the combinator over a local `String` tripped E0597 on the
+/// temporary parser's drop.
+fn locate_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
+    preceded(
+        take_until("in addition to "),
+        parse_in_addition_other_types_marker,
+    )
     .parse(input)
 }
 
 pub(crate) fn has_in_addition_to_other_types(text: &str) -> bool {
     let lower = text.to_lowercase();
-    preceded(
-        take_until::<_, _, OracleError<'_>>("in addition to "),
-        parse_in_addition_other_types_marker,
-    )
-    .parse(lower.as_str())
-    .is_ok()
+    locate_in_addition_other_types_marker(&lower).is_ok()
 }
 
 /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Decompose a "becomes a
