@@ -3,7 +3,7 @@ use rand::Rng;
 use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CostResume, GameState, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -414,10 +414,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::TributeChoice { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::MiracleCastOffer { .. }
-        | WaitingFor::MadnessCastOffer { .. } => {
-            Some(GameAction::DecideOptionalEffect { accept: false })
-        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Miracle { .. } | CastOfferKind::Madness { .. },
+            ..
+        } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
@@ -509,7 +509,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::ChooseBranch { index: 0 }),
 
         // Discover/Cascade: decline.
-        WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Discover { .. },
+            ..
+        } => Some(GameAction::DiscoverChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
@@ -517,7 +520,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::RevealUntilKeptChoice { .. } => {
             Some(GameAction::DecideOptionalEffect { accept: true })
         }
-        WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Cascade { .. },
+            ..
+        } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
@@ -537,9 +543,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }
 
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
-        WaitingFor::AdventureCastChoice { .. } => {
-            Some(GameAction::ChooseAdventureFace { creature: true })
-        }
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Adventure { .. },
+            ..
+        } => Some(GameAction::ChooseAdventureFace { creature: true }),
         WaitingFor::ModalFaceChoice { .. } => {
             Some(GameAction::ChooseModalFace { back_face: false })
         }
@@ -609,7 +616,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
 
         // Paradigm: pass.
-        WaitingFor::ParadigmCastOffer { .. } => Some(GameAction::PassParadigmOffer),
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Paradigm { .. },
+            ..
+        } => Some(GameAction::PassParadigmOffer),
 
         // Vote: pick the first option.
         // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe),
@@ -760,13 +770,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // CR 303.4 + CR 303.4g: Return-as-Aura attach pick — the engine only
-        // installs this state when `legal_targets` is non-empty, so picking
-        // the first candidate is always a legal fallback.
+        // CR 303.4 + CR 303.4g: Aura attach pick — the engine only installs
+        // this state when `legal_targets` is non-empty, so picking the first
+        // candidate is always a legal fallback.
         WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
-            legal_targets.first().map(|&id| GameAction::ChooseTarget {
-                target: Some(engine::types::ability::TargetRef::Object(id)),
-            })
+            legal_targets
+                .first()
+                .cloned()
+                .map(|target| GameAction::ChooseTarget {
+                    target: Some(target),
+                })
         }
 
         // Phyrexian payment: preserve each shard's only legal route when there
@@ -1567,7 +1580,7 @@ pub(crate) fn deterministic_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
         );
-        return Some(GameAction::DeclareAttackers { attacks });
+        return Some(validated_declare_attackers(state, attacks));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -1626,7 +1639,7 @@ fn deterministic_combat_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
         );
-        return Some(GameAction::DeclareAttackers { attacks });
+        return Some(validated_declare_attackers(state, attacks));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -1657,6 +1670,42 @@ fn deterministic_combat_choice(
     }
 
     None
+}
+
+/// CR 508.1 (issue #1523): Guard the combat AI's attacker declaration so the
+/// engine never rejects it. The combat AI draws attackers from the
+/// engine-provided `valid_attacker_ids`, but the chosen *subset* + *target
+/// assignment* can still be illegal as a whole — e.g. a "can't attack alone"
+/// creature swinging solo, a split must-attack-together pair, or a target an
+/// attacker may not legally be assigned. The action driver re-requests the AI's
+/// (deterministic) decision after a rejection, so an illegal declaration loops
+/// forever and softlocks the game ("repeated attempts to attack").
+///
+/// Dry-run the declaration on a cloned state; if the engine would reject it,
+/// fall back to an engine-validated legal `DeclareAttackers` (the first such
+/// candidate from `legal_actions`, which prefers declining combat but still
+/// satisfies any mandatory must-attack requirement, since illegal candidates
+/// are filtered out by the simulation pipeline). This costs one state clone per
+/// attacker declaration — infrequent and far cheaper than the combat AI's own
+/// lookahead — and the fallback path only runs on the rare illegal choice.
+fn validated_declare_attackers(
+    state: &GameState,
+    attacks: Vec<(
+        engine::types::identifiers::ObjectId,
+        engine::game::combat::AttackTarget,
+    )>,
+) -> GameAction {
+    let candidate = GameAction::DeclareAttackers { attacks };
+    let mut sim = state.clone();
+    if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
+        return candidate;
+    }
+    engine::ai_support::legal_actions(state)
+        .into_iter()
+        .find(|action| matches!(action, GameAction::DeclareAttackers { .. }))
+        .unwrap_or(GameAction::DeclareAttackers {
+            attacks: Vec::new(),
+        })
 }
 
 fn prefer_land_drop(
@@ -2411,6 +2460,39 @@ mod tests {
             "Should return DeclareAttackers, got {:?}",
             action
         );
+    }
+
+    /// Issue #1523 (p0 softlock): `validated_declare_attackers` must never
+    /// return an attacker declaration the engine would reject — otherwise the
+    /// deterministic action driver re-submits it forever ("repeated attempts to
+    /// attack"). Given an illegal declaration (here a tapped creature, which
+    /// can't be declared as an attacker, CR 508.1a), the guard dry-runs it,
+    /// sees the rejection, and falls back to a legal declaration that does NOT
+    /// contain the illegal attacker.
+    #[test]
+    fn validated_declare_attackers_drops_illegal_attacker() {
+        let mut state = make_state();
+        state.phase = Phase::DeclareAttackers;
+        let creature = add_creature(&mut state, PlayerId(0), 3, 3);
+        // Tap it: a tapped creature can't be a legal attacker.
+        state.objects.get_mut(&creature).unwrap().tapped = true;
+        let target = engine::game::combat::AttackTarget::Player(PlayerId(1));
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![creature],
+            valid_attack_targets: vec![target],
+        };
+
+        let action = validated_declare_attackers(&state, vec![(creature, target)]);
+
+        match action {
+            GameAction::DeclareAttackers { attacks } => assert!(
+                !attacks.iter().any(|(id, _)| *id == creature),
+                "guard must drop the illegal (tapped) attacker, got {attacks:?}"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a

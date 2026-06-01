@@ -6,7 +6,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
     TargetFilter, TargetRef,
 };
-use engine::types::game_state::{CastingVariant, StackEntryKind};
+use engine::types::game_state::{CastOfferKind, CastingVariant, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -191,7 +191,7 @@ fn optional_cost_skipped_clears_flag() {
 #[test]
 fn bargain_additional_cost_paid_reduces_self_spell_cost() {
     use engine::types::ability::{StaticCondition, StaticDefinition};
-    use engine::types::statics::StaticMode;
+    use engine::types::statics::{CostModifyMode, StaticMode};
 
     fn build_scenario() -> (engine::game::scenario::GameRunner, ObjectId, Vec<ObjectId>) {
         let mut scenario = GameScenario::new();
@@ -201,7 +201,8 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             .map(|_| scenario.add_basic_land(P0, ManaColor::Green))
             .collect();
 
-        let reduce_static = StaticDefinition::new(StaticMode::ReduceCost {
+        let reduce_static = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,
@@ -1752,7 +1753,10 @@ fn miracle_accept_casts_for_miracle_cost() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::MiracleCastOffer { .. }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
         ),
         "should be MiracleCastOffer, got {:?}",
         runner.state().waiting_for
@@ -1854,7 +1858,10 @@ fn miracle_sorcery_casts_during_draw_step() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::MiracleCastOffer { .. }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
         ),
         "should be MiracleCastOffer during draw step"
     );

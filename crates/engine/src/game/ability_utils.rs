@@ -311,6 +311,14 @@ pub fn build_target_slots(
 ///
 /// Indices are sorted (printed order, CR 608.2c) to match
 /// `build_chained_resolved`; duplicate indices (CR 700.2d) repeat the mode.
+// CR 700.2 + CR 601.2b/c: Each parameter encodes a distinct, irreducible piece
+// of the modal slot-build context (game state, ability definitions, chosen mode
+// indices, per-mode display text, source identity, controller, spell context,
+// announced X). Grouping any pair would either fabricate a transient struct
+// with no other use site or hide a real semantic axis (e.g. `chosen_x` is
+// timing-dependent — `None` before the X round-trip, `Some(x)` after — and
+// must remain visible at every call site).
+#[allow(clippy::too_many_arguments)]
 pub fn build_target_slots_labelled(
     state: &GameState,
     abilities: &[AbilityDefinition],
@@ -319,6 +327,14 @@ pub fn build_target_slots_labelled(
     source_id: ObjectId,
     controller: PlayerId,
     context: &SpellContext,
+    // CR 107.1b + CR 700.2: When the slot build runs AFTER the X round-trip
+    // (deferred target selection — see `casting_costs::begin_deferred_target_selection`),
+    // each freshly-built per-mode resolved ability needs the chosen X value
+    // propagated so target legality filters referencing `X` (e.g. Kozilek's
+    // Command mode 2: "mana value X or less") resolve against the announced
+    // value rather than the default `0`. `None` for callers that build slots
+    // BEFORE X is chosen (the common non-deferred modal path).
+    chosen_x: Option<u32>,
 ) -> Result<(Vec<TargetSelectionSlot>, Vec<Option<String>>), EngineError> {
     let mut ordered: Vec<usize> = indices.to_vec();
     ordered.sort();
@@ -330,6 +346,9 @@ pub fn build_target_slots_labelled(
             .ok_or_else(|| EngineError::InvalidAction(format!("Mode index {idx} out of range")))?;
         let mut resolved = build_resolved_from_def(def, source_id, controller);
         resolved.set_context_recursive(context.clone());
+        if let Some(x) = chosen_x {
+            resolved.set_chosen_x_recursive(x);
+        }
         acc.current_label = mode_descriptions.get(idx).cloned();
         collect_target_slots(state, &resolved, &mut acc)?;
         acc.current_label = None;
@@ -350,6 +369,9 @@ pub fn build_target_slots_labelled(
         if let Ok(mut combined) = build_chained_resolved(abilities, indices, source_id, controller)
         {
             combined.set_context_recursive(context.clone());
+            if let Some(x) = chosen_x {
+                combined.set_chosen_x_recursive(x);
+            }
             if let Ok(combined_slots) = build_target_slots(state, &combined) {
                 debug_assert_eq!(
                     acc.slots.len(),
@@ -373,7 +395,16 @@ pub fn build_target_slots_labelled(
 /// Returns `None` if the ability has no targets.
 pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
     ability.targets.iter().find_map(|t| match t {
-        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+        // CR 608.2h (issue #1582): If the parent target has left the
+        // battlefield — e.g. a token Recoil bounced to hand, which then ceases
+        // to exist per CR 704.5d before the chained "that player discards"
+        // resolves — fall back to last-known information so the player anaphor
+        // still resolves.
+        TargetRef::Object(id) => state
+            .objects
+            .get(id)
+            .map(|obj| obj.controller)
+            .or_else(|| state.lki_cache.get(id).map(|lki| lki.controller)),
         TargetRef::Player(pid) => Some(*pid),
     })
 }
@@ -384,11 +415,20 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 /// per CR 108.3 (owner is the player who started the game with the card in their
 /// deck). Used by `TargetFilter::ParentTargetOwner` for "its owner" anaphors —
 /// e.g., Enslave's "enchanted creature deals 1 damage to its owner" once a
-/// parent-target slot has been bound. Returns `None` if the ability has no
-/// targets or the targeted object no longer exists.
+/// parent-target slot has been bound. Falls back to last-known information (CR
+/// 608.2h) when the object has ceased to exist. Returns `None` only if the
+/// ability has no targets, or an object target is absent from both the live
+/// object map and the LKI cache.
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
     ability.targets.iter().find_map(|t| match t {
-        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
+        // CR 608.2h (issue #1582): Mirror the controller lookup — fall back to
+        // last-known information so "its owner" still resolves after the
+        // referenced object (e.g. a bounced token) has ceased to exist.
+        TargetRef::Object(id) => state
+            .objects
+            .get(id)
+            .map(|obj| obj.owner)
+            .or_else(|| state.lki_cache.get(id).map(|lki| lki.owner)),
         TargetRef::Player(_) => None,
     })
 }
@@ -3979,6 +4019,74 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 608.2h + CR 704.5d (issue #1582): Recoil reads "Return
+    /// target permanent to its owner's hand. Then that player discards a card."
+    /// When the bounced permanent is a token, it ceases to exist as a
+    /// state-based action after returning to hand, so the live object is gone
+    /// before the chained discard resolves. The "that player" anaphor
+    /// (`ParentTargetController` / `ParentTargetOwner`) must therefore resolve
+    /// through last-known information (CR 608.2h) rather than the now-removed
+    /// object — otherwise the discard silently resolves against the wrong player
+    /// (or no one), which is exactly the reported bug.
+    #[test]
+    fn parent_target_player_falls_back_to_lki_after_object_ceases_to_exist() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let token = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&token).unwrap().is_token = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTargetController,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Object(token)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        // While the token is live, the anaphor resolves directly (CR 109.4).
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(1))
+        );
+        assert_eq!(parent_target_owner(&ability, &state), Some(PlayerId(1)));
+
+        // Bounce to hand snapshots LKI, then SBA removes the token (CR 704.5d).
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Hand, &mut events);
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            !state.objects.contains_key(&token),
+            "CR 704.5d: bounced token must cease to exist"
+        );
+        assert!(
+            state.lki_cache.contains_key(&token),
+            "battlefield exit must snapshot last-known information for CR 608.2h"
+        );
+
+        // The fix: player anaphors resolve via LKI once the object is gone.
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(1)),
+            "CR 608.2c: 'that player' must resolve via LKI after the token ceased to exist"
+        );
+        assert_eq!(
+            parent_target_owner(&ability, &state),
+            Some(PlayerId(1)),
+            "CR 608.2c: 'its owner' must resolve via LKI after the token ceased to exist"
+        );
+    }
+
     //mazes end test for self bounce lands
     #[test]
     fn mazes_end_search_resolves_after_self_bounce_cost() {
@@ -6400,6 +6508,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -7522,6 +7631,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("labelled modal slots build");
 
@@ -7557,6 +7667,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("multi-clause single mode builds");
 
@@ -7591,6 +7702,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("fan-out modal slots build");
 
@@ -7622,6 +7734,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("missing-description modal slots build");
 
