@@ -5,7 +5,9 @@ use nom::combinator::{all_consuming, map, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::animation::{animation_modifications_with_replacement, parse_animation_spec};
+use super::animation::{
+    animation_modifications_with_replacement, has_in_addition_to_other_types, parse_animation_spec,
+};
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
@@ -1841,9 +1843,7 @@ fn build_become_clause(
     // subtypes (so e.g. a Human Soldier that becomes a Frog is only a Frog) unless
     // it says "in addition to its other types", which stays additive. Mirrors the
     // static type-change path's suffix detection.
-    let become_lower = become_text.to_lowercase();
-    // allow-noncombinator: semantic CR 205.1b flag (sets is_additive), not dispatch.
-    let is_additive = become_lower.contains("in addition to its other types");
+    let is_additive = has_in_addition_to_other_types(&become_text);
     let mut modifications = animation_modifications_with_replacement(&animation, is_additive);
     for modification in parse_continuous_modifications(predicate) {
         if !modifications.contains(&modification) {
@@ -1918,9 +1918,7 @@ fn try_parse_become_and_attack_if_able(
     let animation_duration = animation_duration?;
     let animation = parse_animation_spec(animation_text, ctx)?;
     // CR 205.1a: non-additive "becomes a [type]" replaces subtypes.
-    let animation_lower = animation_text.to_lowercase();
-    // allow-noncombinator: semantic CR 205.1b flag (sets is_additive), not dispatch.
-    let is_additive = animation_lower.contains("in addition to its other types");
+    let is_additive = has_in_addition_to_other_types(animation_text);
     let modifications = animation_modifications_with_replacement(&animation, is_additive);
     if modifications.is_empty() {
         return None;

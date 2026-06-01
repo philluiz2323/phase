@@ -518,8 +518,8 @@ fn parse_animation_type_sequence_loose(input: &str) -> OracleResult<'_, Vec<Anim
 }
 
 /// Run the strict (CR 205.3 capitalized) type-sequence parser; fall back to the
-/// case-insensitive `_loose` variant when the input is terminated by the
-/// "in addition to its other [creature ]types" structural signal. The tail
+/// case-insensitive `_loose` variant when the input is terminated by an
+/// "in addition to {its/their/his/her} other [creature ]types" structural signal. The tail
 /// guarantees the preceding phrase is a type expression, so lowercase subtype
 /// words are safe to classify. Shared by [`parse_becomes_type_modifications`]
 /// and [`parse_animation_types`] so both the static-ability and effect-
@@ -529,13 +529,7 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
     // capitalization is present (native effect text, static abilities). The
     // terminator-halt grammar (capitalized subtype required) naturally stops
     // the sequence at lowercase connective words like "in".
-    let suffix_parser = opt(preceded(
-        multispace0,
-        alt((
-            tag("in addition to its other creature types"),
-            tag("in addition to its other types"),
-        )),
-    ));
+    let suffix_parser = opt(preceded(multispace0, parse_in_addition_other_types_marker));
     if let Ok((_, (tokens, _))) = (parse_animation_type_sequence, suffix_parser).parse(input) {
         return Some(tokens);
     }
@@ -558,26 +552,44 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
     None
 }
 
-/// Split `input` on the " in addition to its other [creature ]types" marker,
+/// Split `input` on the " in addition to {its/their/his/her} other
+/// [creature ]types" marker,
 /// returning the prefix and the matched marker variant. Returns `None` if the
 /// marker is absent. Uses `take_until` to locate the marker, then a nom `alt`
 /// to select between the two CR 205.3 variants (creature-types form is the
 /// longer alternative and listed first per nom short-circuit semantics).
 fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     type VE<'a> = OracleError<'a>;
-    // Longer alternative first (nom short-circuit).
     let (_, prefix) =
-        nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to its other")(input)
-            .ok()?;
+        nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to ")(input).ok()?;
     let pos = prefix.len();
     let rest = input[pos..].trim_start();
-    let (_, matched) = alt((
-        tag::<_, _, VE<'_>>("in addition to its other creature types"),
-        tag::<_, _, VE<'_>>("in addition to its other types"),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (_, matched) = parse_in_addition_other_types_marker(rest).ok()?;
     Some((prefix, matched))
+}
+
+fn parse_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("in addition to its other creature types"),
+        tag("in addition to their other creature types"),
+        tag("in addition to his other creature types"),
+        tag("in addition to her other creature types"),
+        tag("in addition to its other types"),
+        tag("in addition to their other types"),
+        tag("in addition to his other types"),
+        tag("in addition to her other types"),
+    ))
+    .parse(input)
+}
+
+pub(crate) fn has_in_addition_to_other_types(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    preceded(
+        take_until::<_, _, OracleError<'_>>("in addition to "),
+        parse_in_addition_other_types_marker,
+    )
+    .parse(lower.as_str())
+    .is_ok()
 }
 
 /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Decompose a "becomes a
