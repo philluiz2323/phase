@@ -21,7 +21,9 @@ use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, ConvokeMode, GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, CastOfferKind, ConvokeMode, GameState, PendingCast, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaUnit};
@@ -218,8 +220,8 @@ impl GameScenario {
 
     /// Add generic named cards to the top of a player's library.
     ///
-    /// The last supplied name becomes the current top card, matching the engine's
-    /// library-top convention (`Vec::last()` / pop-from-end flows).
+    /// The first supplied name becomes the current top card, matching the
+    /// engine's library-top convention (`library[0]`).
     pub fn with_library_top(&mut self, player: PlayerId, names_top_first: &[&str]) -> &mut Self {
         for &name in names_top_first.iter().rev() {
             self.add_card_to_library_top(player, name);
@@ -230,13 +232,25 @@ impl GameScenario {
     /// Add one generic named card to the top of a player's library.
     pub fn add_card_to_library_top(&mut self, player: PlayerId, name: &str) -> ObjectId {
         let card_id = CardId(self.state.next_object_id);
-        create_object(
+        let id = create_object(
             &mut self.state,
             card_id,
             player,
             name.to_string(),
             Zone::Library,
-        )
+        );
+        // Engine convention: `library[0]` is the top. `create_object` appends
+        // to the bottom, so re-seat this card at index 0 for deterministic top
+        // tests.
+        let player_state = self
+            .state
+            .players
+            .iter_mut()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        player_state.library.retain(|&oid| oid != id);
+        player_state.library.insert(0, id);
+        id
     }
 
     /// Add generic named cards to a player's graveyard without rules text.
@@ -372,6 +386,10 @@ impl GameScenario {
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.supertypes.push(Supertype::Basic);
+        // CR 205.4: Basic lands have a single land subtype matching their name
+        // (e.g. Forest). Filters like Quirion Ranger's "return a Forest" cost
+        // match on subtypes, not the card name.
+        obj.card_types.subtypes.push(name.to_string());
         obj.base_card_types = obj.card_types.clone();
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Pre-existing land — see `add_creature` for the parallel rationale.
@@ -611,6 +629,17 @@ impl GameScenario {
         };
         obj.card_types.core_types.push(core_type);
         obj.base_card_types = obj.card_types.clone();
+
+        if zone == Zone::Library {
+            let player_state = self
+                .state
+                .players
+                .iter_mut()
+                .find(|p| p.id == player)
+                .expect("player exists");
+            player_state.library.retain(|&oid| oid != id);
+            player_state.library.insert(0, id);
+        }
 
         CardBuilder {
             state: &mut self.state,
@@ -1272,7 +1301,10 @@ impl GameRunner {
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
-            WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            } => "AdventureCastChoice",
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
             WaitingFor::AlternativeCastChoice { keyword, .. } => match keyword {
                 crate::types::game_state::AlternativeCastKeyword::Warp => {
@@ -1311,10 +1343,16 @@ impl GameRunner {
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
-            WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            } => "DiscoverChoice",
             WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
             WaitingFor::RepeatDecision { .. } => "RepeatDecision",
-            WaitingFor::CascadeChoice { .. } => "CascadeChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            } => "CascadeChoice",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
@@ -1343,10 +1381,19 @@ impl GameRunner {
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
-            WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Paradigm { .. },
+                ..
+            } => "ParadigmCastOffer",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
-            WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
-            WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            } => "MiracleCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Madness { .. },
+                ..
+            } => "MadnessCastOffer",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",

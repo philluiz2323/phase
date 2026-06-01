@@ -27,8 +27,8 @@ use super::stack;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain, modal_choice_for_player,
-    random_select_targets_for_ability, target_constraints_from_modal,
+    build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
+    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -637,7 +637,64 @@ fn begin_deferred_target_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     pending.deferred_target_selection = false;
-    let target_slots = build_target_slots(state, &pending.ability)?;
+    // CR 700.2 + CR 601.2b: For modal casts whose target legality depended on
+    // X (or any deferred cost), the mode-choice step recorded the chosen mode
+    // indices on `pending.chosen_modes`. Rebuild slots with the labelled
+    // builder so the per-mode banner survives the X round-trip — passing
+    // `pending.ability.chosen_x` so per-mode legality filters that reference
+    // `X` (e.g. Kozilek's Command mode 2: "mana value X or less") resolve
+    // against the announced value. Non-modal casts fall back to the unlabelled
+    // builder.
+    // CR 601.2b + CR 601.2c: modes/X are announced (601.2b) before targets are
+    // chosen (601.2c), since target legality (e.g. "mana value X or less") can
+    // depend on the chosen X.
+    let (target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
+        (build_target_slots(state, &pending.ability)?, Vec::new())
+    } else {
+        let obj = state.objects.get(&pending.object_id).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Modal spell object missing for deferred target labels".into(),
+            )
+        })?;
+        let (abilities, mode_descriptions) =
+            if let Some(ability_index) = pending.activation_ability_index {
+                let def = obj.abilities.get(ability_index).ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Modal activated ability missing for deferred target labels".into(),
+                    )
+                })?;
+                (
+                    def.mode_abilities.clone(),
+                    def.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                (
+                    obj.abilities.to_vec(),
+                    obj.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            };
+        debug_assert!(
+            !mode_descriptions.is_empty(),
+            "begin_deferred_target_selection: chosen_modes is non-empty but the source object has no modal descriptions (object {:?}); per-mode target labels would silently degrade",
+            pending.object_id,
+        );
+        build_target_slots_labelled(
+            state,
+            &abilities,
+            &pending.chosen_modes,
+            &mode_descriptions,
+            pending.object_id,
+            pending.ability.controller,
+            &pending.ability.context,
+            pending.ability.chosen_x,
+        )?
+    };
     if target_slots.is_empty() {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
@@ -648,28 +705,36 @@ fn begin_deferred_target_selection(
         pending.ability.target_selection_mode,
         crate::types::ability::TargetSelectionMode::Random
     ) {
-        let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
+        let targets =
+            random_select_targets_for_ability(state, &target_slots, &pending.target_constraints)?;
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
-    if let Some(targets) =
-        auto_select_targets_for_ability(state, &pending.ability, &target_slots, &[])?
-    {
+    if let Some(targets) = auto_select_targets_for_ability(
+        state,
+        &pending.ability,
+        &target_slots,
+        &pending.target_constraints,
+    )? {
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
-    let selection =
-        begin_target_selection_for_ability(state, &pending.ability, &target_slots, &[])?;
+    let selection = begin_target_selection_for_ability(
+        state,
+        &pending.ability,
+        &target_slots,
+        &pending.target_constraints,
+    )?;
     Ok(WaitingFor::TargetSelection {
         player,
         pending_cast: Box::new(pending),
         target_slots,
-        mode_labels: Vec::new(),
+        mode_labels,
         selection,
     })
 }
@@ -1953,15 +2018,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         } else if obj.zone == Zone::Library && obj.owner == player {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
-            // value rather than paying its mana cost"). The static lives on
-            // the granting permanent on the battlefield, not on the spell;
-            // resolve through `top_of_library_permission_source` to fetch it.
-            super::casting::top_of_library_permission_source(
-                state,
-                player,
-                Some(crate::types::ability::CardPlayMode::Cast),
-            )
-            .and_then(|(top_id, _src, alt)| if top_id == object_id { alt } else { None })
+            // value rather than paying its mana cost").
+            super::casting::top_of_library_alt_ability_cost_for_object(state, player, object_id)
         } else {
             None
         }
@@ -4219,7 +4277,7 @@ pub(super) fn max_x_value_excluding(
     object_id: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> u32 {
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CostModifyMode, StaticMode};
 
     let ManaCost::Cost { shards, generic } = cost else {
         return 0;
@@ -4325,8 +4383,16 @@ pub(super) fn max_x_value_excluding(
     // non-functional floor is correctly skipped there, yielding `formula_max` for
     // that candidate. The vast majority of games have zero `MinimumCost` statics,
     // so the hot X-announce / legal-actions path pays only one short-circuiting scan.
-    let floor_active = super::functioning_abilities::battlefield_functioning_statics(state)
-        .any(|(_, def)| matches!(def.mode, StaticMode::MinimumCost { .. }));
+    let floor_active =
+        super::functioning_abilities::battlefield_functioning_statics(state).any(|(_, def)| {
+            matches!(
+                def.mode,
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Minimum,
+                    ..
+                }
+            )
+        });
     if !floor_active {
         return formula_max;
     }
@@ -5017,6 +5083,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -5045,7 +5112,7 @@ mod tests {
     #[test]
     fn cost_paid_multi_sacrifice_blood_artist_co_departed() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::ability::{TargetFilter, TriggerDefinition};
         use crate::types::phase::Phase;
         use crate::types::triggers::TriggerMode;
         use crate::types::GameAction;
@@ -5093,7 +5160,7 @@ mod tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ));
             obj.trigger_definitions.push(trig.clone());
@@ -5205,7 +5272,7 @@ mod tests {
                 is unreadable. Shares Unit B's cross-action consumption gap. See plan Unit B."]
     fn cost_paid_multi_sacrifice_kicker_paused_under_observes() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::ability::{TargetFilter, TriggerDefinition};
         use crate::types::phase::Phase;
         use crate::types::triggers::TriggerMode;
         use crate::types::GameAction;
@@ -5253,7 +5320,7 @@ mod tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ));
             obj.trigger_definitions.push(trig.clone());
@@ -8323,6 +8390,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8441,6 +8509,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8528,6 +8597,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8604,6 +8674,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8713,6 +8784,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),

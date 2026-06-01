@@ -10,9 +10,9 @@ use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient,
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, ManaContribution,
-    ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, FilterProp,
+    ManaContribution, ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -170,6 +170,31 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
 /// `prune_until_next_turn_effects`.
 pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        // CR 514.2: arm "until the end of your next turn" play-permissions when
+        // the grantee's next turn begins — convert to `UntilEndOfTurn` so the
+        // cleanup-step prune (`prune_end_of_turn_casting_permissions`) ends them
+        // at this turn's cleanup, letting the cards be played throughout the
+        // grantee's next turn (Light Up the Stage class).
+        for p in obj.casting_permissions.iter_mut() {
+            if let CastingPermission::PlayFromExile {
+                duration,
+                granted_to,
+                ..
+            } = p
+            {
+                if *granted_to == active_player
+                    && matches!(
+                        duration,
+                        Duration::UntilEndOfNextTurnOf {
+                            player: PlayerScope::Controller
+                        }
+                    )
+                {
+                    *duration = Duration::UntilEndOfTurn;
+                }
+            }
+        }
+
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
                 duration:
@@ -249,6 +274,24 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
 /// Also clears `goaded_by` entries for the active player on all battlefield objects,
 /// per CR 701.15a: goad expires at the beginning of the goading player's next turn.
 pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {
+    // CR 514.2: "until the end of your next turn" effects are *armed* when the
+    // controller's next turn begins — convert them to `UntilEndOfTurn` so the
+    // cleanup-step prune (`prune_end_of_turn_effects`) ends them at THIS turn's
+    // cleanup, persisting through the whole turn. They survive the creation
+    // turn's own cleanup because that turn's untap step already passed before
+    // the effect was created, so this is the controller's *next* turn.
+    for e in state.transient_continuous_effects.iter_mut() {
+        if matches!(
+            e.duration,
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player
+        {
+            e.duration = Duration::UntilEndOfTurn;
+        }
+    }
+
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
         !(matches!(
@@ -1112,8 +1155,8 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 4: Process each remaining layer in order
     for (layer, layer_bucket) in &effects_by_layer {
-        if matches!(*layer, Layer::Copy | Layer::CounterPT) {
-            // Copy handled above; Counter-based P/T handled separately below.
+        if *layer == Layer::Copy {
+            // Copy is handled above, before this loop.
             continue;
         }
 
@@ -1129,6 +1172,14 @@ pub fn evaluate_layers(state: &mut GameState) {
             for effect in &ordered {
                 apply_continuous_effect(state, effect);
             }
+        }
+
+        // CR 613.4c: P/T counters modify power/toughness in layer 7c. Counters
+        // are object state, not continuous effects, so the `CounterPT` bucket is
+        // empty and the fold runs here — after the 7c `+N/+N` effects above and
+        // before the 7d `SwitchPT` (CR 613.4d) handled in a later iteration.
+        if *layer == Layer::CounterPT {
+            apply_pt_counter_modifications(state, bf_ids.iter().copied());
         }
 
         if *layer == Layer::Type {
@@ -1187,35 +1238,12 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
-    // CR 613.4c: Power/toughness counters modify P/T in layer 7c.
+    // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
+    // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
+    // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
+    // before the 7d switch.)
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            let (power_delta, toughness_delta) = obj.counters.iter().fold(
-                (0i32, 0i32),
-                |(power_total, toughness_total), (counter_type, count)| {
-                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
-                        return (power_total, toughness_total);
-                    };
-                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
-                    (
-                        power_total.saturating_add(power.saturating_mul(count)),
-                        toughness_total.saturating_add(toughness.saturating_mul(count)),
-                    )
-                },
-            );
-            if power_delta != 0 {
-                if let Some(ref mut p) = obj.power {
-                    *p = saturating_pt_add(*p, power_delta);
-                }
-            }
-            if toughness_delta != 0 {
-                if let Some(ref mut t) = obj.toughness {
-                    *t = saturating_pt_add(*t, toughness_delta);
-                }
-            }
-
-            // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
-            // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
             }
@@ -1676,7 +1704,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     // Step 3-4: Remaining layers in order, restricted to entered objects.
     let effects_by_layer = gather_active_continuous_effects(state);
     for (layer, layer_bucket) in &effects_by_layer {
-        if matches!(*layer, Layer::Copy | Layer::CounterPT) {
+        if *layer == Layer::Copy {
             continue;
         }
         if !layer_bucket.is_empty() {
@@ -1689,6 +1717,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             for effect in &ordered {
                 apply_continuous_effect_to(state, effect, entered_ids);
             }
+        }
+        // CR 613.4c: P/T counters modify power/toughness in layer 7c, before the
+        // 7d switch (CR 613.4d). The CounterPT bucket carries no continuous
+        // effects, so fold the on-object counters in here.
+        if *layer == Layer::CounterPT {
+            apply_pt_counter_modifications(state, entered_ids.iter().copied());
         }
         if *layer == Layer::Type {
             let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
@@ -1718,8 +1752,9 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     }
 
     // CR 122.1b + CR 613.1f: Keyword counters grant their keyword (Layer 6).
-    // CR 613.4c: Power/toughness counters modify P/T (Layer 7c). CR 306.5c:
-    // loyalty re-derives from loyalty counters. Per-entered fixups only.
+    // CR 306.5c: loyalty re-derives from loyalty counters. Per-entered fixups
+    // only. (P/T counters are applied in-loop at Layer::CounterPT above, in
+    // layer 7c before the 7d switch — CR 613.4c/613.4d.)
     for &id in entered_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             let granted: Vec<Keyword> = obj
@@ -1734,6 +1769,45 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                 if !obj.has_keyword(&keyword) {
                     obj.keywords.push(keyword);
                 }
+            }
+
+            if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+                obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
+    apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
+
+    // CR 603.6a + CR 611.2e: Rebuild the TriggerIndex so the next event scan
+    // sees the entered objects' (and any granted) trigger sets.
+    crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+
+    // Test-only buggy end-of-pass static-index placement (see `evaluate_layers`).
+    if !rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+}
+
+fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<ActiveContinuousEffect> {
+    collect_shared_active_continuous_effects(state)
+        .into_iter()
+        .filter(|effect| effect.layer == layer)
+        .collect()
+}
+
+/// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
+/// layer 7c. Counters are object state rather than continuous effects, so this
+/// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
+/// effects and before the 7d power/toughness switch (CR 613.4d). Applying it
+/// after the switch would transpose asymmetric P/T counters (e.g. `+0/+1`,
+/// `-1/-0`) onto the wrong axis.
+fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            if obj.counters.is_empty() {
+                continue;
             }
 
             let (power_delta, toughness_delta) = obj.counters.iter().fold(
@@ -1759,30 +1833,8 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                     *t = saturating_pt_add(*t, toughness_delta);
                 }
             }
-            if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
-                obj.loyalty = Some(loyalty_counters);
-            }
         }
     }
-
-    // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
-    apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
-
-    // CR 603.6a + CR 611.2e: Rebuild the TriggerIndex so the next event scan
-    // sees the entered objects' (and any granted) trigger sets.
-    crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
-
-    // Test-only buggy end-of-pass static-index placement (see `evaluate_layers`).
-    if !rebuild_static_index_at_top() {
-        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
-}
-
-fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<ActiveContinuousEffect> {
-    collect_shared_active_continuous_effects(state)
-        .into_iter()
-        .filter(|effect| effect.layer == layer)
-        .collect()
 }
 
 /// Collect all active continuous effects from permanents on the battlefield.
@@ -2553,6 +2605,25 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
         return true;
     }
 
+    // CR 613.8a: b modifies power/toughness and a's filter compares P/T.
+    let b_changes_pt = matches!(
+        &b.modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddDynamicPower { .. }
+            | ContinuousModification::AddDynamicToughness { .. }
+            | ContinuousModification::SetPower { .. }
+            | ContinuousModification::SetToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
+    );
+
+    if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
+        return true;
+    }
+
     false
 }
 
@@ -2585,6 +2656,30 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_references_ability)
         }
         TargetFilter::Not { filter } => filter_references_ability(filter),
+        _ => false,
+    }
+}
+
+/// Check if a `TargetFilter` compares power or toughness (CR 613.8a dependency axis).
+fn filter_references_pt_stat(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            properties.iter().any(filter_prop_references_pt_stat)
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_pt_stat)
+        }
+        TargetFilter::Not { filter } => filter_references_pt_stat(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ToughnessGTPower => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
         _ => false,
     }
 }
@@ -3621,9 +3716,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
-        ContinuousModification, ControllerRef, CountScope, Duration, Effect, FilterProp,
-        GainLifePlayer, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        Comparator, ContinuousModification, ControllerRef, CountScope, Duration, Effect,
+        FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
@@ -3891,6 +3987,49 @@ mod tests {
         assert_eq!(obj.toughness, Some(2));
     }
 
+    /// CR 613.4c + CR 613.4d: P/T counters (layer 7c) must be applied BEFORE the
+    /// power/toughness switch (layer 7d). With an asymmetric counter the two
+    /// orders diverge — applying the counter after the switch transposes it onto
+    /// the wrong axis. Regression for the inversion that placed counters in a
+    /// fictional "layer 7e" after the switch (engine returned 2/3 instead of 3/2).
+    #[test]
+    fn pt_counters_apply_before_switch_in_layer_seven() {
+        let mut state = setup();
+        // Base 2/2 so the only P/T asymmetry comes from the counter.
+        let id = make_creature(&mut state, "Switch Host", 2, 2, PlayerId(0));
+
+        let switch = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SwitchPowerToughness]);
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.counters.insert(
+                CounterType::PowerToughness {
+                    power: 0,
+                    toughness: 1,
+                },
+                1,
+            );
+            Arc::make_mut(&mut obj.base_static_definitions).push(switch.clone());
+            obj.static_definitions.push(switch);
+        }
+
+        evaluate_layers(&mut state);
+
+        // 7c counter first: 2/2 -> 2/3. Then 7d switch: 2/3 -> 3/2.
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.power,
+            Some(3),
+            "power must be the post-counter toughness"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "toughness must be the post-counter power"
+        );
+    }
+
     #[test]
     fn combat_assignment_rule_flags_are_post_layer_effects() {
         let mut state = setup();
@@ -3965,6 +4104,42 @@ mod tests {
     /// Helper: creatures you control filter
     fn creature_you_ctrl() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
+    fn creatures_you_ctrl_with_power_ge(threshold: i32) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: threshold },
+                }]),
+        )
+    }
+
+    fn creatures_you_ctrl_with_power_or_toughness_le(threshold: i32) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: threshold },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: threshold },
+                        },
+                    ],
+                }]),
+        )
     }
 
     fn add_lord_static(
@@ -4198,6 +4373,163 @@ mod tests {
         // ModifyPT (layer 7c) gives it +2/+2
         assert_eq!(art_obj.power, Some(2));
         assert_eq!(art_obj.toughness, Some(2));
+    }
+
+    #[test]
+    fn pt_dependency_detects_disjunctive_pt_filter_props() {
+        let filter = creatures_you_ctrl_with_power_or_toughness_le(2);
+
+        assert!(filter_references_pt_stat(&filter));
+    }
+
+    #[test]
+    fn set_pt_layer_orders_unconditional_setters_before_pt_threshold_filters() {
+        let mut state = setup();
+        let _bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
+
+        let shrink = make_creature(&mut state, "Shrink", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&shrink).unwrap();
+            obj.timestamp = 5;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creatures_you_ctrl_with_power_ge(5))
+                // One modification: re-filtering after SetPower would drop power
+                // below the threshold before a second clause could run (CR 613.7a).
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            state
+                .objects
+                .get_mut(&shrink)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let setter = make_creature(&mut state, "Setter", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&setter).unwrap();
+            obj.timestamp = 10;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+            state
+                .objects
+                .get_mut(&setter)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let set_pt_effects: Vec<ActiveContinuousEffect> =
+            collect_shared_active_continuous_effects(&state)
+                .into_iter()
+                .filter(|e| e.layer == Layer::SetPT)
+                .collect();
+        let ordered = order_active_continuous_effects(Layer::SetPT, &set_pt_effects, &state);
+
+        let shrink_set_power = ordered.iter().position(|e| {
+            e.source_id == shrink
+                && matches!(
+                    e.modification,
+                    ContinuousModification::SetPower { value: 1 }
+                )
+        });
+        let setter_set_power = ordered.iter().position(|e| {
+            e.source_id == setter
+                && matches!(
+                    e.modification,
+                    ContinuousModification::SetPower { value: 6 }
+                )
+        });
+        assert!(shrink_set_power.is_some() && setter_set_power.is_some());
+        assert!(
+            setter_set_power.unwrap() < shrink_set_power.unwrap(),
+            "unconditional setter must apply before threshold shrink: {ordered:?}"
+        );
+    }
+
+    /// CR 613.8a: A `SetPT` effect with a power threshold must apply after P/T
+    /// setters that change which creatures meet that threshold.
+    #[test]
+    fn pt_modification_dependency_overrides_timestamp_in_set_pt_layer() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
+
+        let shrink = make_creature(&mut state, "Shrink", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&shrink).unwrap();
+            obj.timestamp = 5;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creatures_you_ctrl_with_power_ge(5))
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            state
+                .objects
+                .get_mut(&shrink)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let setter = make_creature(&mut state, "Setter", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&setter).unwrap();
+            obj.timestamp = 10;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+            state
+                .objects
+                .get_mut(&setter)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(1));
+    }
+
+    /// CR 613.8a: A conditional `ModifyPT` lord must apply after unconditional
+    /// lords that raise creatures above the threshold.
+    #[test]
+    fn pt_modification_dependency_overrides_timestamp_in_modify_pt_layer() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 3, 3, PlayerId(0));
+
+        let conditional = make_creature(&mut state, "Conditional Lord", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&conditional).unwrap();
+            obj.timestamp = 5;
+        }
+        add_lord_static(
+            &mut state,
+            conditional,
+            creatures_you_ctrl_with_power_ge(4),
+            2,
+            0,
+        );
+
+        let unconditional = make_creature(&mut state, "Unconditional Lord", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&unconditional).unwrap();
+            obj.timestamp = 10;
+        }
+        add_lord_static(&mut state, unconditional, creature_you_ctrl(), 2, 0);
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(7));
+        assert_eq!(bear_obj.toughness, Some(3));
     }
 
     #[test]
@@ -5212,7 +5544,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks)
@@ -5258,7 +5590,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks);
@@ -5342,7 +5674,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks)
@@ -7007,7 +7339,7 @@ mod tests {
                 AbilityKind::Activated,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
             obj.abilities = Arc::new((*obj.base_abilities).clone());
@@ -7598,6 +7930,96 @@ mod tests {
     }
 
     #[test]
+    fn until_end_of_next_turn_permission_armed_at_untap_expires_at_cleanup() {
+        // CR 514.2: a "until the end of your next turn" play-permission (Light Up
+        // the Stage class) must SURVIVE the grantee's untap step — armed to
+        // UntilEndOfTurn — and expire only at that turn's cleanup, so the exiled
+        // cards are playable throughout the next turn. Contrast
+        // `until_your_next_turn_prune_expires_for_grantee_only`, where
+        // UntilNextTurnOf is removed outright at untap.
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+            });
+
+        // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
+        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        let perms = &state.objects[&exiled].casting_permissions;
+        assert_eq!(
+            perms.len(),
+            1,
+            "permission must survive the untap step (CR 514.2), not be pruned"
+        );
+        assert!(
+            matches!(
+                perms[0],
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    ..
+                }
+            ),
+            "permission must be armed to UntilEndOfTurn at untap, got {:?}",
+            perms[0]
+        );
+
+        // Cleanup of that turn: the armed permission now expires.
+        prune_end_of_turn_casting_permissions(&mut state);
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "armed permission expires at the cleanup of the grantee's next turn"
+        );
+    }
+
+    #[test]
+    fn until_end_of_next_turn_effect_armed_at_untap_expires_at_cleanup() {
+        // CR 514.2: a continuous effect granted "until the end of your next turn"
+        // (Slip Out the Back class) must persist through the controller's next
+        // turn — armed at untap, pruned at that turn's cleanup.
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_turn_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "effect must survive the untap step (armed), not be pruned"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].duration,
+            Duration::UntilEndOfTurn,
+            "effect must be armed to UntilEndOfTurn at untap"
+        );
+
+        prune_end_of_turn_effects(&mut state);
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "armed effect expires at the cleanup of the controller's next turn"
+        );
+    }
+
+    #[test]
     fn until_your_next_turn_prune_expires_for_grantee_only() {
         let mut state = setup();
         let card_a = make_exiled_card(&mut state, PlayerId(0));
@@ -8088,7 +8510,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Composite {
