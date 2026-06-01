@@ -1655,6 +1655,8 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
         alt((
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
+            // CR 514.2: "until the end of your next turn" persists through
+            // that turn's cleanup step.
             value(
                 Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
@@ -1667,6 +1669,8 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
                 },
                 tag(" until your next turn"),
             ),
+            // CR 514.2: third-person next-turn duration in granted-effect
+            // clauses follows the same controller/grantee binding.
             value(
                 Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
