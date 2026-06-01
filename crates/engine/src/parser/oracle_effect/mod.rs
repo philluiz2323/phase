@@ -56,7 +56,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace1};
-use nom::combinator::{all_consuming, eof, map, not, opt, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -86,13 +86,13 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
-    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer,
-    GameRestriction, IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -120,7 +120,7 @@ use self::search::{
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
     parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
-    try_parse_same_is_true_continuation,
+    try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use crate::parser::oracle_ir::ast::*;
@@ -1880,6 +1880,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: mass_target,
+            enters_under: None,
             enter_tapped: false,
         }
     } else {
@@ -2149,6 +2150,78 @@ fn try_parse_create_token_choice(
         chooser: PlayerFilter::Controller,
         branches: vec![left_def, right_def],
     }))
+}
+
+/// CR 111.2 + CR 608.2c: Shared-verb token sequences such as "create a ...
+/// token with deathtouch and a ... token with lifelink" carry two token noun
+/// phrases in written order, not one token with a long keyword suffix. Parse
+/// both noun phrases through the normal token grammar and chain the second.
+fn try_parse_create_token_sequence(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), after_create_original) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("create ")).parse(i)
+    })?;
+    let consumed = tp.original.len() - after_create_original.len();
+    let after_create = TextPair::new(after_create_original, &tp.lower[consumed..]);
+
+    let (left_original, left_lower, right_original, right_lower) =
+        split_create_token_sequence(after_create)?;
+    let left_effect = token::try_parse_token(left_lower, left_original.trim(), ctx)?;
+    let right_effect = token::try_parse_token(right_lower, right_original.trim(), ctx)?;
+
+    if !matches!(left_effect, Effect::Token { .. }) || !matches!(right_effect, Effect::Token { .. })
+    {
+        return None;
+    }
+
+    let mut right_def = AbilityDefinition::new(AbilityKind::Spell, right_effect);
+    right_def.description = Some(format!("create {}", right_original.trim()));
+
+    let mut clause = parsed_clause(left_effect);
+    clause.sub_ability = Some(Box::new(right_def));
+    Some(clause)
+}
+
+fn split_create_token_sequence<'a>(
+    after_create: TextPair<'a>,
+) -> Option<(&'a str, &'a str, &'a str, &'a str)> {
+    let mut search_lower = after_create.lower;
+    while let Some((before_lower, (), right_lower)) =
+        nom_primitives::scan_preceded(search_lower, parse_token_sequence_conjunction)
+    {
+        let split_offset = after_create.lower.len() - search_lower.len() + before_lower.len();
+        let right_offset = after_create.lower.len() - right_lower.len();
+        let left_original = &after_create.original[..split_offset];
+        let left_lower = &after_create.lower[..split_offset];
+        let right_original = &after_create.original[right_offset..];
+
+        if token::parse_token_description(left_original.trim()).is_some()
+            && token::parse_token_description(right_original.trim()).is_some()
+        {
+            return Some((left_original, left_lower, right_original, right_lower));
+        }
+
+        search_lower = right_lower;
+    }
+    None
+}
+
+fn parse_token_sequence_conjunction(input: &str) -> OracleResult<'_, ()> {
+    preceded(tag("and "), peek(parse_token_noun_start)).parse(input)
+}
+
+fn parse_token_noun_start(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("a ")),
+        value((), tag("an ")),
+        value((), tag("one ")),
+        value((), tag("x ")),
+        value((), tag("that many ")),
+        value((), terminated(nom_primitives::parse_number, tag(" "))),
+    ))
+    .parse(input)
 }
 
 /// CR 115.1 + CR 608.2d + CR 701.26a-b: "tap or untap target <object>" (and the
@@ -3406,7 +3479,9 @@ fn try_parse_choose_player_to_verb(
 /// `TargetFilter` are left untouched — the surrounding `relative_player_scope`
 /// already binds object-controller anaphora ("a creature they control").
 ///
-/// `GainLife` (recipient is the `GainLifePlayer` enum, not a `TargetFilter`)
+/// `GainLife` (recipient `player` is now a `TargetFilter`, but no current card
+/// pairs "choose a player to gain life" with this verb, so it is not yet wired
+/// into the `rebind` match below)
 /// and `Discard`/`DiscardCard` (no player-recipient `TargetFilter` — `Discard`
 /// is self-scoped, `DiscardCard.filter` selects *what* is discarded, not
 /// *who*) are a deliberate class-boundary deferral: no current card pairs
@@ -3602,6 +3677,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // "unless that player" pattern is matched before the left half is misread as
     // just the default consequence (losing the avoidance alternative).
     if let Some(clause) = try_parse_unless_three_branch_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 111.2 + CR 608.2c: Shared-verb token sequences — checked before the
+    // choice splitter and single-token dispatch so the second token noun phrase
+    // is preserved in the effect chain.
+    if let Some(clause) = try_parse_create_token_sequence(tp, ctx) {
         return clause;
     }
 
@@ -6509,10 +6591,10 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
         },
         Effect::GainLife {
             amount,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         } if is_targeted && matches!(target, TargetFilter::Player) => Effect::GainLife {
             amount,
-            player: GainLifePlayer::TargetPlayer,
+            player: TargetFilter::Player,
         },
         other => other,
     }
@@ -7275,6 +7357,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Battlefield,
+                            enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
                         },
                         rem,
@@ -7301,6 +7384,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -7316,6 +7400,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -8717,7 +8802,7 @@ fn rewrite_recipient_on_link(def: &mut AbilityDefinition, filter: &TargetFilter)
         // Any other effect family is out of scope for compound-subject
         // distribution at this entry point. Returning false keeps the
         // detector tight and prevents silent misparse on bodies whose
-        // recipient binding is encoded differently (GainLifePlayer enum, etc.).
+        // recipient binding is encoded differently (e.g. nested filter props).
         _ => false,
     }
 }
@@ -10288,27 +10373,52 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
 }
 
 /// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
-/// — a duration-scoped flash-timing grant (Teferi, Time Raveler +1 class),
-/// not a `CastFromZone` card-selection permission. Must dispatch before
-/// `try_parse_cast_effect`, which misclassifies the spell-type filter as an
-/// activation-time target and blocks loyalty activation (issue #878).
+/// — a duration-scoped flash-timing grant (Teferi, Time Raveler +1 class;
+/// Emergence Zone sacrifice ability), not a `CastFromZone` card-selection
+/// permission. Must dispatch before `try_parse_cast_effect`, which
+/// misclassifies the spell-type filter as an activation-time target and blocks
+/// loyalty activation (issue #878).
 fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    let (type_text_orig, _) = nom_on_lower(tp.original, tp.lower, |i| {
+    let ((type_text_orig, flash_duration), _) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
         let (i, _) = tag("cast ").parse(i)?;
-        let (i, type_part) = take_until(" spells as though they had flash").parse(i)?;
-        let (i, _) = tag(" spells as though they had flash").parse(i)?;
+        let (i, (type_part, duration)) = alt((
+            map(tag("spells this turn as though they had flash"), |_| {
+                ("", Duration::UntilEndOfTurn)
+            }),
+            map(
+                terminated(
+                    take_until(" spells this turn as though they had flash"),
+                    tag(" spells this turn as though they had flash"),
+                ),
+                |type_part: &str| (type_part.trim(), Duration::UntilEndOfTurn),
+            ),
+            map(tag("spells as though they had flash"), |_| {
+                (
+                    "",
+                    Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
+                )
+            }),
+            map(
+                terminated(
+                    take_until(" spells as though they had flash"),
+                    tag(" spells as though they had flash"),
+                ),
+                |type_part: &str| {
+                    (
+                        type_part.trim(),
+                        Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
+                    )
+                },
+            ),
+        ))
+        .parse(i)?;
         let (i, _) = eof.parse(i)?;
-        Ok((i, type_part.trim().to_string()))
-    })
-    .or_else(|| {
-        nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, _) = opt(tag("you may ")).parse(i)?;
-            let (i, _) = tag("cast ").parse(i)?;
-            let (i, _) = tag("spells as though they had flash").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((i, String::new()))
-        })
+        Ok((i, (type_part.to_string(), duration)))
     })?;
 
     let mut spell_filter = if type_text_orig.is_empty() {
@@ -10344,9 +10454,7 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
                 definition: Box::new(granted_static),
             },
         ])],
-        duration: Some(Duration::UntilNextTurnOf {
-            player: PlayerScope::Controller,
-        }),
+        duration: Some(flash_duration),
         target: Some(TargetFilter::Controller),
     }))
 }
@@ -10795,6 +10903,69 @@ fn attach_same_is_true_keywords(defs: &mut [AbilityDefinition], keywords: &[Keyw
             }
             return;
         }
+    }
+}
+
+/// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
+/// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
+/// conditional keyword-counter placement (`PutCounter { counter_type:
+/// Keyword(..) }` gated by a graveyard-keyword `condition`) and appends one
+/// cloned sibling per listed keyword — swapping both the placed counter's
+/// keyword and the gating condition's keyword. Each clone is an independent
+/// sequential sibling, mirroring the antecedent's structure, so the engine
+/// resolves all keyword counters during the trigger's one resolution. This is
+/// the counters-class analogue of `attach_same_is_true_keywords` (static
+/// grants); it covers the whole "repeat this process for <list>" class.
+fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &[Keyword]) {
+    let Some(template) = defs
+        .iter()
+        .rev()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Keyword(_),
+                    ..
+                }
+            )
+        })
+        .cloned()
+    else {
+        return;
+    };
+    for keyword in keywords {
+        let mut new_def = template.clone();
+        if let Effect::PutCounter { counter_type, .. } = &mut *new_def.effect {
+            *counter_type = CounterType::Keyword(keyword.kind());
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_ability_condition_keyword(condition, keyword);
+        }
+        // Each replicated counter placement is its own sequential instruction.
+        new_def.sub_link = SubAbilityLink::SequentialSibling;
+        new_def.sub_ability = None;
+        defs.push(new_def);
+    }
+}
+
+/// Swap the gating keyword inside an `AbilityCondition` to `new_keyword`. Used
+/// by `attach_repeat_process_keywords` to rewrite the "if a creature card in
+/// your graveyard has <keyword>" gate of each replicated counter clause.
+fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keyword: &Keyword) {
+    if let AbilityCondition::QuantityCheck { lhs, rhs, .. } = condition {
+        rewrite_quantity_expr_keyword(lhs, new_keyword);
+        rewrite_quantity_expr_keyword(rhs, new_keyword);
+    }
+}
+
+/// Rewrite the keyword inside any `ObjectCount` filter carried by a
+/// `QuantityExpr` (the count side of a graveyard-keyword condition).
+fn rewrite_quantity_expr_keyword(expr: &mut QuantityExpr, new_keyword: &Keyword) {
+    if let QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    } = expr
+    {
+        rewrite_filter_keyword(filter, new_keyword);
     }
 }
 
@@ -12675,6 +12846,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
                 },
                 FilterProp::SameNameAsParentTarget,
             ])),
+            enters_under: None,
             enter_tapped,
         },
     )));
@@ -13065,6 +13237,42 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::SameIsTrueFor(keywords)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 608.2c: "Repeat this process for <keyword list>." — Kathril, Aspect
+        // Warper. Must precede the generic "repeat this process" directive below,
+        // whose `tag("repeat this process")` would otherwise swallow the prefix
+        // and discard the keyword list. Replicates the antecedent conditional
+        // keyword-counter clause once per listed keyword during lowering.
+        if !clauses.is_empty() {
+            if let Some(keywords) = try_parse_repeat_process_for_keywords(normalized_text) {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "repeat_process_for_keywords_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::RepeatProcessForKeywords(keywords)),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });
@@ -15743,10 +15951,10 @@ mod tests {
         AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
         ChoiceType, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
         ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
-        GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
-        TypeFilter, TypedFilter, ZoneRef,
+        LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
+        ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope, QuantityExpr,
+        QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -19147,6 +19355,7 @@ mod tests {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Player,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -19207,6 +19416,7 @@ mod tests {
                     origin: Some(Zone::Exile),
                     destination: Zone::Graveyard,
                     target: TargetFilter::ExiledBySource,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -19864,10 +20074,32 @@ mod tests {
                 e,
                 Effect::ChangeZoneAll {
                     destination: Zone::Battlefield,
+                    enters_under: None,
                     ..
                 }
             ),
             "return-all-to-battlefield must lower to ChangeZoneAll, got {e:?}"
+        );
+    }
+
+    /// CR 110.2a: Mass return-to-battlefield text can override the default
+    /// controller. Rise of the Dark Realms class must preserve "under your
+    /// control" on `ChangeZoneAll`, not only on single-object `ChangeZone`.
+    #[test]
+    fn effect_return_all_to_battlefield_under_your_control_preserves_controller_override() {
+        let e = parse_effect(
+            "Return all creature cards from all graveyards to the battlefield under your control",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Battlefield,
+                    enters_under: Some(ControllerRef::You),
+                    ..
+                }
+            ),
+            "mass return under your control must preserve enters_under, got {e:?}"
         );
     }
 
@@ -20963,7 +21195,7 @@ mod tests {
                             scope: crate::types::ability::ObjectScope::Target
                         }
                     },
-                    player: GainLifePlayer::TargetedController
+                    player: TargetFilter::ParentTargetController
                 }
             ),
             "Expected TargetPower + TargetedController, got {e:?}"
@@ -20994,7 +21226,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -21165,7 +21397,7 @@ mod tests {
         assert!(matches!(
             &*gain_life.effect,
             Effect::GainLife {
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
                 amount: QuantityExpr::Fixed { value: 3 },
             }
         ));
@@ -21355,6 +21587,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -21369,6 +21602,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -21660,6 +21894,67 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn effect_chain_create_distinct_token_sequence_preserves_second_token() {
+        let def = parse_effect_chain(
+            "Create a 3/3 colorless Phyrexian Wurm artifact creature token with deathtouch and a 3/3 colorless Phyrexian Wurm artifact creature token with lifelink.",
+            AbilityKind::Spell,
+        );
+
+        match &*def.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Phyrexian Wurm");
+                assert_eq!(keywords, &vec![Keyword::Deathtouch]);
+            }
+            other => panic!("expected first Token effect, got {other:?}"),
+        }
+
+        let sub = def.sub_ability.as_ref().expect("second token sub-ability");
+        match &*sub.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Phyrexian Wurm");
+                assert_eq!(keywords, &vec![Keyword::Lifelink]);
+            }
+            other => panic!("expected second Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_chain_create_generic_token_sequence() {
+        let def = parse_effect_chain(
+            "Create a Food token and a Treasure token.",
+            AbilityKind::Spell,
+        );
+
+        match &*def.effect {
+            Effect::Token { name, .. } => assert_eq!(name, "Food"),
+            other => panic!("expected first Token effect, got {other:?}"),
+        }
+
+        let sub = def.sub_ability.as_ref().expect("second token sub-ability");
+        match &*sub.effect {
+            Effect::Token { name, .. } => assert_eq!(name, "Treasure"),
+            other => panic!("expected second Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_chain_create_single_token_with_keyword_conjunction_does_not_split() {
+        let def = parse_effect_chain(
+            "Create a 4/4 white Angel creature token with flying and vigilance.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.sub_ability.is_none());
+        match &*def.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Angel");
+                assert_eq!(keywords, &vec![Keyword::Flying, Keyword::Vigilance]);
+            }
+            other => panic!("expected Token effect, got {other:?}"),
+        }
     }
 
     #[test]
@@ -32353,7 +32648,7 @@ mod tests {
                         },
                     }),
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
     }
@@ -32369,7 +32664,7 @@ mod tests {
                         filter: TargetFilter::Typed(TypedFilter::creature()),
                     },
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
     }
@@ -32576,7 +32871,7 @@ mod tests {
                         },
                     }),
                 },
-                player: GainLifePlayer::TargetPlayer,
+                player: TargetFilter::Player,
             },
         );
     }
@@ -34378,6 +34673,27 @@ mod tests {
             "Expected GrantNextSpellAbility(CastAsThoughFlash), got {:?}",
             def.effect
         );
+    }
+
+    #[test]
+    fn parse_cast_spells_this_turn_as_though_flash() {
+        // Emergence Zone (issue #1542): "this turn" is part of the permission
+        // phrase, not a separate duration prefix — must not fall through to
+        // `CastFromZone`. Covers both bare "spells" and type-filtered spells.
+        for text in [
+            "You may cast spells this turn as though they had flash.",
+            "You may cast creature spells this turn as though they had flash.",
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Activated);
+            let Effect::GenericEffect {
+                duration, target, ..
+            } = *def.effect
+            else {
+                panic!("expected GenericEffect flash grant, got {:?}", def.effect);
+            };
+            assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(target, Some(TargetFilter::Controller));
+        }
     }
 
     #[test]
@@ -38850,6 +39166,7 @@ mod snapshot_tests {
             origin,
             destination,
             target,
+            enters_under,
             enter_tapped,
         } = &*same_name.effect
         else {
@@ -38857,6 +39174,7 @@ mod snapshot_tests {
         };
         assert_eq!(*origin, Some(Zone::Graveyard));
         assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*enters_under, None);
         assert!(*enter_tapped);
         let TargetFilter::Typed(tail) = target else {
             panic!("expected typed same-name tail, got {target:?}");

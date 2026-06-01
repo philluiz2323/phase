@@ -101,6 +101,45 @@ fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFi
     }
 }
 
+/// CR 115.1: A "becomes the target of a spell or ability you control / an
+/// opponent controls" trigger (e.g. Valiant — Heartfire Hero, Emberheart
+/// Challenger) restricts the targeting source's controller. Parse that optional
+/// controller off the front of the post-event remainder; `None` leaves the
+/// source unrestricted (bare "a spell or ability").
+fn parse_target_source_controller(rest: &str) -> Option<ControllerRef> {
+    alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>("you control"),
+        ),
+        value(ControllerRef::Opponent, tag("an opponent controls")),
+    ))
+    .parse(rest.trim_start())
+    .ok()
+    .map(|(_, controller)| controller)
+}
+
+/// CR 115.1: The targeting source of such a trigger is a stack spell OR a stack
+/// ability controlled by `controller`. Mirrors the spell/ability split the
+/// stack-entry matcher (`stack_entry_matches_filter`) enforces at runtime: the
+/// spell branch pairs `StackSpell` with a controller-scoped `Typed`, the ability
+/// branch uses `StackAbility`'s own controller dimension.
+fn becomes_target_source_filter(controller: ControllerRef) -> TargetFilter {
+    TargetFilter::Or {
+        filters: vec![
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::default().controller(controller.clone())),
+                ],
+            },
+            TargetFilter::StackAbility {
+                controller: Some(controller),
+            },
+        ],
+    }
+}
+
 fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
     nom_primitives::scan_preceded(lower, |input| {
         let (rest, _) = (
@@ -5784,6 +5823,13 @@ fn try_parse_event(
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;
                 set_trigger_subject(&mut def, subject);
+                // CR 115.1: "a spell or ability you control" / "an opponent
+                // controls" restricts the targeting source's controller. Without
+                // it the trigger fires for any source — including the opponent's
+                // (Valiant bug #1378).
+                if let Some(controller) = parse_target_source_controller(remaining) {
+                    def.valid_source = Some(becomes_target_source_filter(controller));
+                }
             }
             // CR 115.1a + CR 115.1b: "target" spell text defines targeted spells,
             // and Aura spells are always targeted via enchant.
@@ -7644,12 +7690,27 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let phase_text = stripped.trim();
     let mut def = make_base();
     def.mode = TriggerMode::Phase;
-    def.phase = scan_for_phase(phase_text);
+    let phase = scan_for_phase(phase_text);
+    let is_generic_main_phase = phase.is_none() && scan_for_generic_main_phase(phase_text);
+    def.phase = phase;
 
     // CR 503.1a / CR 507.1: Parse possessive qualifier and trailing suffix for turn constraint.
     // Uses nom prefix dispatch: opponent possessives checked before bare "your" to avoid
     // "your opponent's" matching as "your".
-    def.constraint = parse_turn_constraint(phase_text);
+    let turn_constraint = parse_turn_constraint(phase_text);
+    def.constraint = if is_generic_main_phase {
+        match turn_constraint {
+            // CR 505.1 + CR 603.2b: "each of your main phases" is not one
+            // concrete phase; it triggers at the start of either main phase
+            // on the source controller's turn.
+            Some(TriggerConstraint::OnlyDuringYourTurn) => {
+                Some(TriggerConstraint::OnlyDuringYourMainPhase)
+            }
+            other => other,
+        }
+    } else {
+        turn_constraint
+    };
     if scan_contains(phase_text, "enchanted player's") {
         def.valid_target = Some(TargetFilter::AttachedTo);
     }
@@ -10034,9 +10095,20 @@ fn parse_phase_keyword(input: &str) -> nom::IResult<&str, Phase, OracleError<'_>
     .parse(input)
 }
 
+/// CR 505.1: "main phase" collectively names the precombat and postcombat
+/// main phases without selecting one concrete `Phase` value.
+fn parse_generic_main_phase_keyword(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value((), pair(tag("main phase"), opt(tag("s")))).parse(input)
+}
+
 /// Scan phase_text for a phase keyword at each word boundary using nom combinators.
 fn scan_for_phase(text: &str) -> Option<Phase> {
     super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_phase_keyword)
+}
+
+fn scan_for_generic_main_phase(text: &str) -> bool {
+    super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_generic_main_phase_keyword)
+        .is_some()
 }
 
 /// CR 503.1a / CR 507.1: Parse turn constraint from phase text using nom prefix dispatch.
@@ -10053,13 +10125,15 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
         tag("your opponent's "),
         tag("your opponents\u{2019} "),
         tag("your opponents' "),
+        tag("each of your opponents\u{2019} "),
+        tag("each of your opponents' "),
     ))
     .parse(phase_text)
     .is_ok()
     {
         return Some(TriggerConstraint::OnlyDuringOpponentsTurn);
     }
-    if tag::<_, _, OracleError<'_>>("your ")
+    if alt((tag::<_, _, OracleError<'_>>("each of your "), tag("your ")))
         .parse(phase_text)
         .is_ok()
     {
@@ -14861,7 +14935,7 @@ mod tests {
                 // subject by a post-hoc `player_scope` override.
                 assert_eq!(
                     player,
-                    &crate::types::ability::GainLifePlayer::Controller,
+                    &crate::types::ability::TargetFilter::Controller,
                     "Exquisite Blood: 'you gain' recipient must be the ability controller"
                 );
             }
@@ -16812,6 +16886,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(def.valid_source, Some(TargetFilter::StackSpell));
+    }
+
+    #[test]
+    fn trigger_becomes_target_you_control_sets_controller_source() {
+        // Valiant (#1378): "a spell or ability you control" must restrict the
+        // targeting source's controller, not fire for any source.
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of a spell or ability you control for the first time each turn, put a +1/+1 counter on it.",
+            "Heartfire Hero",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::You))
+        );
+    }
+
+    #[test]
+    fn trigger_becomes_target_opponent_controls_sets_controller_source() {
+        // CR 115.1: the same spell-or-ability controller grammar supports
+        // opponent-scoped source restrictions.
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of a spell or ability an opponent controls, draw a card.",
+            "Opponent-Scoped Observer",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::Opponent))
+        );
     }
 
     #[test]
@@ -19167,6 +19271,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::PostCombatMain));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
         assert!(def.optional, "trigger should be optional ('you may')");
 
         let bound_qty = QuantityExpr::Ref {
@@ -19213,6 +19318,21 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::PreCombatMain));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_each_of_your_main_phases_uses_main_phase_constraint() {
+        let def = parse_trigger_line(
+            "At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.",
+            "Carpet of Flowers",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, None);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourMainPhase)
+        );
+        assert!(def.optional, "trigger should be optional ('you may')");
     }
 
     /// Coalition Relic, third ability — Future Sight artifact, issue #130.
@@ -22903,6 +23023,95 @@ mod tests {
             );
         }
     }
+
+    /// Issue #1592 — Odric, Lunarch Marshal's CURRENT (post-errata) Oracle text:
+    /// the trigger is now "At the beginning of each combat" and the
+    /// "same is true for" list gained `skulk` (13 keywords total). Each grant
+    /// must still be an `IsPresent`-gated `StaticDefinition` (gated on a creature
+    /// you control having that keyword) — NOT an unconditional grant of every
+    /// keyword. This guards the runtime symptom reported in #1592 ("it's getting
+    /// all of the abilities") against the current card text.
+    #[test]
+    fn parse_odric_current_errata_text_gates_all_thirteen_keywords() {
+        use crate::types::keywords::Keyword;
+
+        let def = parse_trigger_line(
+            "At the beginning of each combat, creatures you control gain first \
+             strike until end of turn if a creature you control has first strike. \
+             The same is true for flying, deathtouch, double strike, haste, \
+             hexproof, indestructible, lifelink, menace, reach, skulk, trample, \
+             and vigilance.",
+            "Odric, Lunarch Marshal",
+        );
+        let execute = def.execute.expect("Odric trigger must have an execute");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", execute.effect);
+        };
+        // First strike + 12 "same is true for" keywords = 13 definitions.
+        assert_eq!(
+            static_abilities.len(),
+            13,
+            "expected 13 conditioned StaticDefinitions, got {}",
+            static_abilities.len()
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "the 'same is true for' sentence must fold into static_abilities"
+        );
+
+        let expected = [
+            Keyword::FirstStrike,
+            Keyword::Flying,
+            Keyword::Deathtouch,
+            Keyword::DoubleStrike,
+            Keyword::Haste,
+            Keyword::Hexproof,
+            Keyword::Indestructible,
+            Keyword::Lifelink,
+            Keyword::Menace,
+            Keyword::Reach,
+            Keyword::Skulk,
+            Keyword::Trample,
+            Keyword::Vigilance,
+        ];
+        for (sdef, keyword) in static_abilities.iter().zip(expected.iter()) {
+            // Grant: one AddKeyword for this keyword.
+            assert!(
+                sdef.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword { keyword: k } if k == keyword
+                )),
+                "static def must grant {keyword:?}, mods: {:?}",
+                sdef.modifications
+            );
+            // Gate: IsPresent of a creature YOU CONTROL with the SAME keyword.
+            let Some(crate::types::ability::StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            }) = &sdef.condition
+            else {
+                panic!(
+                    "static def for {keyword:?} must be IsPresent-gated, got {:?}",
+                    sdef.condition
+                );
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::WithKeyword { value } if value == keyword
+                )),
+                "gate for {keyword:?} must check WithKeyword({keyword:?}), props: {:?}",
+                tf.properties
+            );
+            assert_eq!(
+                tf.controller,
+                Some(crate::types::ability::ControllerRef::You),
+                "gate for {keyword:?} must be scoped to creatures you control"
+            );
+        }
+    }
 }
 
 /// Snapshot tests locking current trigger parser output before the IR split.
@@ -22925,6 +23134,98 @@ mod snapshot_tests {
             "Test Card",
         );
         insta::assert_json_snapshot!(def);
+    }
+
+    /// CR 608.2c (issue #1584): Kathril's "Repeat this process for <10 keywords>"
+    /// must replicate the conditional keyword-counter placement once per keyword
+    /// — each placing that keyword's counter gated on a creature card in the
+    /// graveyard with the SAME keyword — instead of silently dropping the list.
+    #[test]
+    fn kathril_repeats_keyword_counters_across_graveyard_keywords() {
+        use crate::types::ability::{Effect, FilterProp, QuantityExpr, QuantityRef, TargetFilter};
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::{Keyword, KeywordKind};
+
+        fn condition_keyword(cond: &AbilityCondition) -> Option<Keyword> {
+            let AbilityCondition::QuantityCheck { lhs, .. } = cond else {
+                return None;
+            };
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } = lhs
+            else {
+                return None;
+            };
+            let TargetFilter::Typed(typed) = filter else {
+                return None;
+            };
+            typed.properties.iter().find_map(|prop| match prop {
+                FilterProp::WithKeyword { value } => Some(value.clone()),
+                _ => None,
+            })
+        }
+
+        let def = parse_trigger_line(
+            "When Kathril enters, put a flying counter on any creature you control \
+             if a creature card in your graveyard has flying. Repeat this process \
+             for first strike, double strike, deathtouch, hexproof, indestructible, \
+             lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 \
+             counter on Kathril for each counter put on a creature this way.",
+            "Kathril, Aspect Warper",
+        );
+
+        // Walk the execute chain, collecting each keyword counter with the
+        // keyword its graveyard gate checks.
+        let mut node = def.execute.as_deref();
+        let mut keyword_counters: Vec<(KeywordKind, KeywordKind)> = Vec::new();
+        let mut saw_p1p1 = false;
+        while let Some(d) = node {
+            if let Effect::PutCounter { counter_type, .. } = &*d.effect {
+                match counter_type {
+                    CounterType::Keyword(kind) => {
+                        let cond_kw = d
+                            .condition
+                            .as_ref()
+                            .and_then(condition_keyword)
+                            .expect("keyword counter keeps its graveyard-keyword gate");
+                        keyword_counters.push((*kind, cond_kw.kind()));
+                    }
+                    CounterType::Plus1Plus1 => saw_p1p1 = true,
+                    other => panic!("unexpected counter type {other:?}"),
+                }
+            }
+            node = d.sub_ability.as_deref();
+        }
+
+        let expected = [
+            KeywordKind::Flying,
+            KeywordKind::FirstStrike,
+            KeywordKind::DoubleStrike,
+            KeywordKind::Deathtouch,
+            KeywordKind::Hexproof,
+            KeywordKind::Indestructible,
+            KeywordKind::Lifelink,
+            KeywordKind::Menace,
+            KeywordKind::Reach,
+            KeywordKind::Trample,
+            KeywordKind::Vigilance,
+        ];
+        assert_eq!(
+            keyword_counters.len(),
+            expected.len(),
+            "all 11 keyword counters present (flying + the 10 repeated)"
+        );
+        for ((counter_kw, gate_kw), exp) in keyword_counters.iter().zip(expected) {
+            assert_eq!(*counter_kw, exp, "placed counter keyword matches the list");
+            assert_eq!(
+                *gate_kw, exp,
+                "the graveyard gate checks the SAME keyword as the placed counter"
+            );
+        }
+        assert!(
+            saw_p1p1,
+            "the +1/+1-on-Kathril follow-up survives the expansion"
+        );
     }
 
     #[test]

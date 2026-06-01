@@ -49,7 +49,6 @@ type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
 type PayCost = Extract<WaitingFor, { type: "PayCost" }>;
 type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
-type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
@@ -219,9 +218,12 @@ export function CardChoiceModal() {
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
-    case "ParadigmCastOffer":
+    case "CastOffer":
       if (!canActForWaitingState) return null;
-      return <ParadigmCastOfferModal data={waitingFor.data} />;
+      if (waitingFor.data.kind.type === "Paradigm") {
+        return <ParadigmCastOfferModal offers={waitingFor.data.kind.offers} />;
+      }
+      return null;
     case "PayManaAbilityMana":
       if (!canActForWaitingState) return null;
       return <PayManaAbilityManaModal data={waitingFor.data} />;
@@ -1668,7 +1670,11 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
 
 // ── Paradigm Cast Offer Modal ─────────────────────────────────────────────────
 
-function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
+function ParadigmCastOfferModal({
+  offers,
+}: {
+  offers: ObjectId[];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1698,7 +1704,7 @@ function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
       }
     >
       <ScrollableCardStrip>
-        {data.offers.map((id, index) => {
+        {offers.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           return (

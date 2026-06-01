@@ -350,6 +350,7 @@ fn discard_applier(
             from: Zone::Hand,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -4057,6 +4058,8 @@ pub fn continue_replacement(
             });
             let post = if real_work.is_some() {
                 real_work
+            } else if EventModifiers::has_only_event_modifier(accept_effect.as_deref()) {
+                None
             } else {
                 accept_effect
             };
@@ -4134,8 +4137,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, GainLifePlayer,
-        QuantityExpr, ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, QuantityExpr,
+        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -4415,6 +4418,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -4793,7 +4797,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ))
             .description("X".to_string());
@@ -4888,7 +4892,7 @@ mod tests {
                             qty: crate::types::ability::QuantityRef::EventContextAmount,
                         }),
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -4934,7 +4938,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -5355,6 +5359,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -6312,6 +6317,7 @@ mod tests {
             from: Zone::Hand,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Tapped,
             enter_with_counters: Vec::new(),
             controller_override: None,

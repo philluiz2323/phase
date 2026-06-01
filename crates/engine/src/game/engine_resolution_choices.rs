@@ -7,8 +7,8 @@ use crate::types::ability::{
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, OutsideGameChoiceSource, PayableResource,
-    PendingContinuation, WaitingFor,
+    ActionResult, CastOfferKind, ChosenDamageSource, GameState, OutsideGameChoiceSource,
+    PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -64,10 +64,16 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
         waiting_for,
         WaitingFor::ScryChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
-            | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            }
             | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::RepeatDecision { .. }
-            | WaitingFor::CascadeChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
@@ -312,10 +318,13 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
-            WaitingFor::DiscoverChoice {
+            WaitingFor::CastOffer {
                 player,
-                hit_card,
-                exiled_misses,
+                kind:
+                    CastOfferKind::Discover {
+                        hit_card,
+                        exiled_misses,
+                    },
             },
             GameAction::DiscoverChoice { choice },
         ) => {
@@ -426,11 +435,14 @@ pub(super) fn handle_resolution_choice(
             }
         }
         (
-            WaitingFor::CascadeChoice {
+            WaitingFor::CastOffer {
                 player,
-                hit_card,
-                exiled_misses,
-                source_mv,
+                kind:
+                    CastOfferKind::Cascade {
+                        hit_card,
+                        exiled_misses,
+                        source_mv,
+                    },
             },
             GameAction::CascadeChoice { choice },
         ) => {
@@ -1378,6 +1390,12 @@ pub(super) fn handle_resolution_choice(
                                     state.waiting_for.clone(),
                                 ));
                             }
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1886,6 +1904,28 @@ pub(super) fn handle_resolution_choice(
                             state, &ctx, *card_id, events,
                         ) {
                             effects::change_zone::ZoneMoveResult::Done => {}
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                state.pending_change_zone_iteration =
+                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        source_id: ctx.source_id,
+                                        controller: ctx.controller,
+                                        origin: ctx.origin,
+                                        destination: ctx.destination,
+                                        enter_transformed: ctx.enter_transformed,
+                                        enter_tapped: ctx.enter_tapped,
+                                        enters_under_player: ctx.enters_under_player,
+                                        enters_attacking: ctx.enters_attacking,
+                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        duration: ctx.duration.clone(),
+                                        track_exiled_by_source: ctx.track_exiled_by_source,
+                                        effect_kind,
+                                    });
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                             effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
                                 // CR 614.12b + CR 614.1c + CR 614.13: stash the
                                 // unprocessed cards so the drain in
