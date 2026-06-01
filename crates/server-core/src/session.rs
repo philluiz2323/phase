@@ -113,6 +113,12 @@ pub struct GameSession {
     /// Host preference: start automatically when every configured seat is
     /// occupied by a joined human or AI.
     pub start_when_full: bool,
+    /// Engine events produced by `start_game` (the d20 first-player contest's
+    /// `DieRolled` batch). Captured here so the INITIAL post-start broadcast can
+    /// surface them to clients; cleared after that broadcast so late joiners and
+    /// reconnects do not re-receive the contest dice. Empty when the game has
+    /// not started or the events have already been broadcast.
+    pub start_events: Vec<GameEvent>,
 }
 
 impl GameSession {
@@ -456,7 +462,11 @@ impl GameSession {
             Some(db),
         );
         self.state.log_player_names = self.display_names.clone();
-        let _ = start_game(&mut self.state);
+        // Capture the d20 first-player contest events so the initial broadcast
+        // can surface them; the broadcaster clears `start_events` afterward so
+        // joiners/reconnects do not re-see the dice.
+        let result = start_game(&mut self.state);
+        self.start_events = result.events;
         self.game_started = true;
         self.lobby_meta = None;
         Ok(())
@@ -575,6 +585,7 @@ impl GameSession {
             lobby_meta: ps.lobby_meta,
             game_started: ps.game_started,
             start_when_full: ps.start_when_full,
+            start_events: Vec::new(),
         }
     }
 }
@@ -681,6 +692,7 @@ impl SessionManager {
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
+            start_events: Vec::new(),
         };
 
         self.token_to_game
@@ -716,7 +728,6 @@ impl SessionManager {
         &mut self,
         game_code: &str,
         display_name: String,
-        password_protected: bool,
     ) -> Result<SeatReservation, String> {
         let session = self
             .sessions
@@ -731,11 +742,7 @@ impl SessionManager {
             .first_open_seat()
             .ok_or_else(|| "Game is already full".to_string())?;
         let token = generate_player_token();
-        let expires_at_ms = if password_protected {
-            None
-        } else {
-            Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS)
-        };
+        let expires_at_ms = Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS);
         let reservation = SeatReservation {
             token: token.clone(),
             display_name,
@@ -1819,6 +1826,7 @@ mod tests {
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
+            start_events: Vec::new(),
         };
 
         let game_started_before = session.game_started;
