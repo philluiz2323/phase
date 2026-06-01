@@ -178,29 +178,24 @@ pub fn attach_to(
     old_target
 }
 
-/// CR 702.16c/d + CR 701.3/702.5/702.6: Why a host forbids an attachment,
-/// independent of the Enchant filter and zone. This is the single authority for
-/// the protection ("E" of DEBT) + can't-be-attached legality, shared by the
-/// attach gate (`can_attach_to_object`, applied when attaching) and the
-/// state-based-action re-check (`sba::is_valid_attachment_target`, applied
-/// continuously). Previously the attach path checked the prohibition statics but
-/// not protection, and the SBA path checked neither — so protection (or a
-/// can't-be-enchanted/equipped static) *acquired after* a legal attachment never
-/// detached the attachment (CR 702.16c/d, CR 704.5m/n).
+/// Why a host forbids an attachment, independent of the Enchant filter and zone.
+/// This is the single authority for protection ("E" of DEBT) plus
+/// can't-be-attached legality, shared by attach gates and SBA re-checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttachIllegality {
-    /// CR 702.16c/d: the host has protection whose quality excludes this
-    /// attachment. Per CR 704.5m an illegal Aura is put into its owner's
-    /// graveyard; per CR 704.5n an illegal Equipment/Fortification becomes
-    /// unattached but stays on the battlefield.
+    /// CR 702.16c: A protected permanent or player can't be enchanted by an
+    /// Aura of the protected quality.
+    /// CR 702.16d: A protected permanent can't be equipped or fortified by an
+    /// attachment of the protected quality.
     Protection,
-    /// CR 701.3/702.5b/702.6e: a `CantBeAttached` (any), `CantBeEnchanted`
-    /// (Auras), or `CantBeEquipped` (Equipment) static on the host forbids it.
+    /// CR 303.4c: Other applicable effects can make an Aura's host illegal.
+    /// CR 701.3a: An attachment can't be attached to something it couldn't
+    /// enchant, equip, or fortify.
     Prohibited,
 }
 
-/// CR 702.16c/d + CR 701.3: Returns `Some(reason)` when `host` forbids
-/// `attachment` via protection or a can't-be-attached static, else `None`.
+/// Returns `Some(reason)` when an object host forbids `attachment` via
+/// protection or a can't-be-attached static, else `None`.
 ///
 /// Does NOT evaluate the Enchant filter or zone — that legality is applied by
 /// the caller (`is_valid_attachment_target` checks it for the SBA path). The
@@ -212,9 +207,8 @@ pub(crate) fn attachment_illegality(
     attachment_id: ObjectId,
     host_id: ObjectId,
 ) -> Option<AttachIllegality> {
-    // CR 701.3: `CantBeAttached` blocks any attachment (Aura / Equipment /
-    // Fortification); `CantBeEnchanted` blocks Auras; `CantBeEquipped` blocks
-    // Equipment.
+    // CR 701.3a: `CantBeAttached` blocks any attachment from being attached to
+    // the host.
     if crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeAttached") {
         return Some(AttachIllegality::Prohibited);
     }
@@ -228,20 +222,23 @@ pub(crate) fn attachment_illegality(
                     obj.card_types.subtypes.iter().any(|s| s == "Equipment"),
                 )
             });
+    // CR 303.4c: Other applicable effects can make an Aura's host illegal.
     if attacher_is_aura
         && crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeEnchanted")
     {
         return Some(AttachIllegality::Prohibited);
     }
+    // CR 701.3a: Equipment can't be attached to an object it can't equip.
     if attacher_is_equipment
         && crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeEquipped")
     {
         return Some(AttachIllegality::Prohibited);
     }
 
-    // CR 702.16c/d: protection by the attachment's quality (color, "from
-    // artifacts", etc.). `protection_prevents_from(host, attachment)` is the
-    // shared DEBT check — the same one targeting/damage use.
+    // CR 702.16c: Protection from a quality prevents Auras of that quality from
+    // being attached to the protected permanent.
+    // CR 702.16d: Protection from a quality prevents Equipment or Fortifications
+    // of that quality from being attached to the protected permanent.
     if let (Some(host), Some(attachment)) = (
         state.objects.get(&host_id),
         state.objects.get(&attachment_id),
@@ -254,38 +251,71 @@ pub(crate) fn attachment_illegality(
     None
 }
 
+/// Returns `Some(reason)` when a player host forbids `attachment` via
+/// player-scoped protection, else `None`.
+pub(crate) fn player_attachment_illegality(
+    state: &GameState,
+    attachment_id: ObjectId,
+    host: PlayerId,
+) -> Option<AttachIllegality> {
+    // CR 702.16c: A player with protection can't be enchanted by an Aura of the
+    // protected quality.
+    if crate::game::static_abilities::player_protection_from(state, host, Some(attachment_id)) {
+        return Some(AttachIllegality::Protection);
+    }
+    None
+}
+
 pub(crate) fn can_attach_to_object(
     state: &GameState,
     attachment_id: ObjectId,
     target_id: ObjectId,
 ) -> bool {
-    // CR 701.3 + CR 702.16c/d: a blocked attachment (prohibition static or
-    // protection) is not a legal host for an attach / non-spell Aura entry.
+    // CR 701.3a: A blocked attachment is not a legal host for an attach effect.
     attachment_illegality(state, attachment_id, target_id).is_none()
 }
 
-/// CR 303.4 + CR 702.5: Attach an Aura to a player (Curse cycle, Faith's
-/// Fetters-class). Mirrors `attach_to`'s "detach from previous host" cleanup
-/// for Object hosts, but no host-side `attachments` list is touched (a player
-/// is not a `GameObject` and has no such field).
+pub(crate) fn can_attach_to_player(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+) -> bool {
+    // CR 303.4c: A player who has left the game is an illegal Aura host.
+    if !state
+        .players
+        .get(target_player.0 as usize)
+        .is_some_and(|p| !p.is_eliminated)
+    {
+        return false;
+    }
+    // CR 702.16c: Protection from a quality prevents Auras of that quality from
+    // being attached to the protected player.
+    player_attachment_illegality(state, attachment_id, target_player).is_none()
+}
+
+/// CR 303.4: Attach an Aura to a player (Curse cycle, Faith's Fetters-class).
+/// Mirrors `attach_to`'s "detach from previous host" cleanup for Object hosts,
+/// but no host-side `attachments` list is touched (a player is not a
+/// `GameObject` and has no such field).
 ///
-/// CR 301.5 + CR 303.4i: Equipment / Fortification cannot legally be attached
-/// to a player. Mirroring `attach_to`'s silent-no-op gating pattern, an
-/// illegal Aura/Equipment pairing here is a no-op rather than an error: a
-/// caller that has already validated the source (the cast pipeline, the
-/// debug spawn-attached path) sees no change in state, and a buggy caller
+/// CR 303.4i: An Aura can't enter attached to a player it can't legally
+/// enchant.
+/// CR 301.5: Equipment can't legally be attached to a player.
+/// Mirroring `attach_to`'s silent-no-op gating pattern, an illegal
+/// Aura/Equipment pairing here is a no-op rather than an error: a caller that
+/// has already validated the source sees no change in state, and a buggy caller
 /// that hasn't validated cannot drive the engine into an illegal state.
 pub fn attach_to_player(
     state: &mut GameState,
     attachment_id: ObjectId,
     target_player: PlayerId,
 ) -> Option<TargetRef> {
-    // CR 301.5: Equipment / Fortification cannot attach to a player.
+    // CR 301.5: Equipment or Fortification cannot attach to a player.
     // CR 303.4: Only Auras may have a player host. Any non-Aura attachment is
     // silently rejected here so the only paths into a `Player` `attached_to`
     // value are legitimate Aura attachments. The Equipment/Fortification check
     // is redundant given the Aura whitelist but is named explicitly so future
-    // attachment subtypes (CR 702.6 / CR 702.114) cannot slip through by
+    // attachment subtypes cannot slip through by
     // accident — the contract is "Auras only", not "anything that isn't
     // currently equipment".
     let is_aura = state
@@ -293,6 +323,9 @@ pub fn attach_to_player(
         .get(&attachment_id)
         .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
     if !is_aura {
+        return None;
+    }
+    if !can_attach_to_player(state, attachment_id, target_player) {
         return None;
     }
 
@@ -418,7 +451,7 @@ mod tests {
 
     #[test]
     fn attachment_illegality_cant_be_enchanted_blocks_aura() {
-        // CR 702.5b: a `CantBeEnchanted` static forbids an Aura.
+        // CR 303.4c: other applicable effects can make an Aura's host illegal.
         let mut state = setup();
         let aura = spawn_with_subtype(&mut state, "Aura", "Aura");
         let creature = spawn_creature(&mut state, "Bear");
@@ -429,6 +462,32 @@ mod tests {
             Some(AttachIllegality::Prohibited)
         );
         assert!(!can_attach_to_object(&state, aura, creature));
+    }
+
+    #[test]
+    fn player_attachment_illegality_protection_blocks_aura() {
+        // CR 702.16c: a player with protection from everything can't be
+        // enchanted by an Aura.
+        let mut state = setup();
+        let aura = spawn_with_subtype(&mut state, "Curse", "Aura");
+        state.add_transient_continuous_effect(
+            aura,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Protection(
+                    crate::types::keywords::ProtectionTarget::Everything,
+                ),
+            }],
+            None,
+        );
+
+        assert_eq!(
+            player_attachment_illegality(&state, aura, PlayerId(1)),
+            Some(AttachIllegality::Protection)
+        );
+        assert!(!can_attach_to_player(&state, aura, PlayerId(1)));
     }
 
     #[test]

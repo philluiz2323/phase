@@ -698,7 +698,7 @@ fn check_unattached_auras(
                     !is_valid_attachment_target(state, id, t)
                 }
                 Some(crate::game::game_object::AttachTarget::Player(pid)) => {
-                    !is_player_in_game(state, pid)
+                    !crate::game::effects::attach::can_attach_to_player(state, id, pid)
                 }
                 None => true,
             };
@@ -1265,8 +1265,8 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 /// Spellweaver Volute, Don't Worry About It), that zone IS the legal host
 /// zone and the battlefield default is suspended.
 ///
-/// CR 301.5 + CR 702.6: Equipment carries no `Keyword::Enchant`, so legality
-/// reduces to the printed "on the battlefield" requirement.
+/// CR 301.5: Equipment carries no `Keyword::Enchant`, so legality reduces to
+/// the printed "on the battlefield" requirement.
 fn is_valid_attachment_target(
     state: &GameState,
     attacher_id: crate::types::identifiers::ObjectId,
@@ -1278,12 +1278,12 @@ fn is_valid_attachment_target(
     let Some(target) = state.objects.get(&target_id) else {
         return false;
     };
-    // CR 702.16c/d + CR 701.3: protection acquired by the host, or a
-    // `CantBeAttached`/`CantBeEnchanted`/`CantBeEquipped` static, makes the host
-    // an illegal attachment target — the attachment must detach as an SBA even
-    // though the Enchant filter / zone below may still match. This is the "E" of
-    // DEBT for the continuously-acquired case (Mother of Runes freeing a
-    // creature from an opponent's Pacifism).
+    // CR 704.5m: An Aura attached to an illegal object is put into its owner's
+    // graveyard.
+    // CR 704.5n: Equipment attached to an illegal permanent becomes unattached.
+    // Protection acquired by the host, or a prohibition static, makes the host
+    // an illegal attachment target even though the Enchant filter / zone below
+    // may still match.
     if crate::game::effects::attach::attachment_illegality(state, attacher_id, target_id).is_some()
     {
         return false;
@@ -1337,16 +1337,6 @@ fn explicit_enchant_zones(filter: &crate::types::ability::TargetFilter) -> Vec<Z
         TargetFilter::Not { filter } => explicit_enchant_zones(filter),
         _ => vec![],
     }
-}
-
-/// CR 303.4c: A player has "left the game" when they are eliminated. Multiplayer
-/// exits flip the same flag (CR 800.4a). Out-of-range PlayerIds (defensive) are
-/// treated as not in game so the Aura SBA cleans up the dangling reference.
-fn is_player_in_game(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
-    state
-        .players
-        .get(player_id.0 as usize)
-        .is_some_and(|p| !p.is_eliminated)
 }
 
 /// CR 704.5t: If a player's venture marker is on the bottommost room of a dungeon card,
@@ -1890,9 +1880,10 @@ mod tests {
 
     #[test]
     fn sba_aura_detaches_when_host_gains_protection() {
-        // CR 702.16c + CR 704.5m: a creature enchanted by an opponent's white
+        // CR 702.16c: a creature enchanted by an opponent's white
         // Aura (Pacifism) that gains protection from white (Mother of Runes) →
         // the Aura is put into its owner's graveyard as a state-based action.
+        // CR 704.5m: An illegal Aura is put into its owner's graveyard.
         let mut state = setup();
         let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let aura = create_object(
@@ -1929,17 +1920,64 @@ mod tests {
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
-        // CR 704.5m: the now-illegal Aura leaves the battlefield (to graveyard).
+        // CR 704.5m: the now-illegal Aura goes to its owner's graveyard.
         assert!(
             !state.battlefield.contains(&aura),
-            "an Aura on a host that gained protection must detach (CR 702.16c / 704.5m)"
+            "an Aura on a host that gained protection must detach"
+        );
+        assert!(
+            state.players[1].graveyard.contains(&aura),
+            "the illegal Aura must move to its owner's graveyard"
         );
     }
 
     #[test]
+    fn sba_player_aura_detaches_when_player_gains_protection() {
+        // CR 702.16c: a player with protection from everything can't be
+        // enchanted by an Aura.
+        // CR 704.5m: An Aura attached to an illegal player is put into its
+        // owner's graveyard.
+        let mut state = setup();
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(PlayerId(0)));
+        }
+        state.add_transient_continuous_effect(
+            aura,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Protection(
+                    crate::types::keywords::ProtectionTarget::Everything,
+                ),
+            }],
+            None,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&aura));
+        assert!(state.players[1].graveyard.contains(&aura));
+    }
+
+    #[test]
     fn sba_equipment_unattaches_when_host_gains_protection_from_artifacts() {
-        // CR 702.16d + CR 704.5n: an equipped creature that gains protection
-        // from artifacts → the Equipment unattaches but stays on the battlefield.
+        // CR 702.16d: an equipped creature that gains protection from artifacts
+        // can't be equipped by artifact Equipment.
+        // CR 704.5n: Illegal Equipment unattaches but stays on the battlefield.
         let mut state = setup();
         let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let equip = create_object(
