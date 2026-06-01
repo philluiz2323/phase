@@ -39,11 +39,7 @@ pub fn eliminate_players_simultaneously(
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
         // earlier loser in this same batch).
-        if state
-            .players
-            .iter()
-            .any(|p| p.id == player && p.is_eliminated)
-        {
+        if !players::is_alive(state, player) {
             continue;
         }
 
@@ -54,13 +50,7 @@ pub fn eliminate_players_simultaneously(
         if state.format_config.team_based {
             let team = players::teammates(state, player);
             for teammate in team {
-                if !state
-                    .players
-                    .iter()
-                    .any(|p| p.id == teammate && p.is_eliminated)
-                {
-                    do_eliminate(state, teammate, events);
-                }
+                do_eliminate(state, teammate, events);
             }
         }
     }

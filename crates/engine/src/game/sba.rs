@@ -62,13 +62,16 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // so the game-over check sees the true post-event living set — a draw
         // (winner: None) when all remaining players lose at once, instead of
         // crowning whichever player happened to be eliminated first.
-        let mut losers: Vec<PlayerId> = collect_life_losers(state); // CR 704.5a
-        losers.extend(collect_draw_from_empty_losers(state)); // CR 704.5b
-        losers.extend(collect_poison_losers(state)); // CR 704.5c
-        losers.extend(collect_commander_damage_losers(state)); // CR 704.6c
-                                                               // A player can meet several loss conditions at once — dedup so each is
-                                                               // eliminated (and emits PlayerLost) exactly once.
-        losers.sort_unstable_by_key(|p| p.0);
+        // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
+        // check before applying any of them.
+        let mut losers: Vec<PlayerId> = collect_life_losers(state);
+        losers.extend(collect_draw_from_empty_losers(state));
+        losers.extend(collect_poison_losers(state));
+        losers.extend(collect_commander_damage_losers(state));
+
+        // A player can meet several loss conditions at once — dedup so each is
+        // eliminated (and emits PlayerLost) exactly once.
+        losers.sort_unstable();
         losers.dedup();
         if !losers.is_empty() {
             any_performed = true;
