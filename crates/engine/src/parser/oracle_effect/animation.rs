@@ -168,6 +168,51 @@ pub(crate) fn animation_modifications(
     modifications
 }
 
+/// CR 205.1a + CR 613.1d (Layer 4): Build the layer-4 modifications for a
+/// "[subject] becomes a [type]" animation, applying SUBTYPE **replacement** (not
+/// addition) unless the effect is "in addition to its other types".
+///
+/// `animation_modifications` is the purely-additive base (the CR 205.1b
+/// "in addition" reading). When `is_additive` is false, CR 205.1a applies: a
+/// granted subtype replaces the existing subtypes from the same set — so a
+/// creature that "becomes a Frog" ends up with subtypes exactly `[Frog]` rather
+/// than retaining its prior creature types (Human, Soldier, …). This injects a
+/// `RemoveAllSubtypes` for each affected subtype set before its first
+/// `AddSubtype`.
+///
+/// Card TYPES stay additive (`AddType`): an animated permanent keeps its other
+/// card types (e.g. an animated land remains a land, a creature stays a
+/// creature) — only the subtype dimension is replaced. This matches the
+/// behavior the combined pump+become path already produces.
+pub(crate) fn animation_modifications_with_replacement(
+    spec: &AnimationSpec,
+    is_additive: bool,
+) -> Vec<crate::types::ability::ContinuousModification> {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::card_type::{noncreature_subtype_set, SubtypeSet};
+
+    let base = animation_modifications(spec);
+    if is_additive {
+        return base;
+    }
+
+    let mut out = Vec::with_capacity(base.len() + 1);
+    let mut removed_sets: Vec<SubtypeSet> = Vec::new();
+    for modification in base {
+        // CR 205.1a: a granted subtype replaces existing subtypes from its set —
+        // inject `RemoveAllSubtypes` once per affected set before the AddSubtype.
+        if let ContinuousModification::AddSubtype { subtype } = &modification {
+            let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
+            if !removed_sets.contains(&set) {
+                out.push(ContinuousModification::RemoveAllSubtypes { set });
+                removed_sets.push(set);
+            }
+        }
+        out.push(modification);
+    }
+    out
+}
+
 /// Parse a color word prefix from animation text, handling "colorless" and
 /// the five MTG colors.
 ///
@@ -771,6 +816,91 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+    }
+
+    #[test]
+    fn become_subtype_replaces_when_not_additive() {
+        // CR 205.1a: "becomes a Frog" replaces creature subtypes — a Human
+        // Soldier becomes ONLY a Frog — so the granted subtype is preceded by a
+        // RemoveAllSubtypes{Creature} wipe (not appended additively).
+        use crate::types::ability::ContinuousModification as CM;
+        use crate::types::card_type::SubtypeSet;
+
+        let spec = parse_animation_spec("a green Frog", &mut ParseContext::default())
+            .expect("Frog animation should parse");
+        let mods = animation_modifications_with_replacement(&spec, false);
+
+        let wipe = mods.iter().position(|m| {
+            matches!(
+                m,
+                CM::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature
+                }
+            )
+        });
+        let add = mods
+            .iter()
+            .position(|m| matches!(m, CM::AddSubtype { subtype } if subtype == "Frog"));
+        assert!(
+            wipe.is_some(),
+            "non-additive become must wipe creature subtypes, got {mods:?}"
+        );
+        assert!(add.is_some(), "expected AddSubtype(Frog), got {mods:?}");
+        assert!(
+            wipe.unwrap() < add.unwrap(),
+            "the RemoveAllSubtypes wipe must precede the granted subtype, got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn become_additive_keeps_existing_subtypes() {
+        // CR 205.1b: "in addition to its other types" stays additive — no wipe.
+        use crate::types::ability::ContinuousModification as CM;
+
+        let spec = parse_animation_spec("a green Frog", &mut ParseContext::default())
+            .expect("Frog animation should parse");
+        let mods = animation_modifications_with_replacement(&spec, true);
+
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, CM::RemoveAllSubtypes { .. })),
+            "additive become must not wipe subtypes, got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, CM::AddSubtype { subtype } if subtype == "Frog")),
+            "expected AddSubtype(Frog), got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn become_artifact_creature_stays_additive() {
+        // CR 205.1b: "becomes an artifact creature" is additive (gains artifact,
+        // stays a creature) — keep AddType, never collapse to SetCardTypes.
+        use crate::types::ability::ContinuousModification as CM;
+        use crate::types::card_type::CoreType;
+
+        let spec = parse_animation_spec("an artifact creature", &mut ParseContext::default())
+            .expect("artifact creature animation should parse");
+        let mods = animation_modifications_with_replacement(&spec, false);
+
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            CM::AddType {
+                core_type: CoreType::Artifact
+            }
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            CM::AddType {
+                core_type: CoreType::Creature
+            }
+        )));
+        assert!(
+            !mods.iter().any(|m| matches!(m, CM::SetCardTypes { .. })),
+            "artifact creature must stay additive, got {mods:?}"
+        );
     }
 
     #[test]
