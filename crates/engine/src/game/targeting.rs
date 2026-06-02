@@ -1333,11 +1333,8 @@ fn can_target(
     // CR 702.11e: An "ignore hexproof" effect (Detection Tower) lets the targeting
     // source's controller target a permanent "as though it didn't have hexproof".
     // It bypasses Hexproof / Hexproof from [quality] only — never Shroud.
-    let ignores_hexproof = crate::game::static_abilities::player_has_static_other(
-        state,
-        source_controller,
-        "IgnoreHexproof",
-    );
+    let ignores_hexproof =
+        crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
     // CR 702.11a: Hexproof prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
@@ -1525,11 +1522,13 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Comparator, QuantityExpr};
+    use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
-    use crate::types::keywords::ProtectionTarget;
+    use crate::types::keywords::{HexproofFilter, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+    use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
     #[test]
@@ -1692,8 +1691,6 @@ mod tests {
     fn ignore_hexproof_lets_controller_target_opponents_hexproof_creature() {
         // CR 702.11e: Detection Tower — while the targeting player has an active
         // "ignore hexproof" effect, opponents' hexproof permanents are legal targets.
-        use crate::types::ability::{ContinuousModification, Duration};
-        use crate::types::statics::StaticMode;
         let (mut state, _c0, c1) = setup_with_creatures();
         state
             .objects
@@ -1715,7 +1712,7 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificPlayer { id: PlayerId(0) },
             vec![ContinuousModification::AddStaticMode {
-                mode: StaticMode::Other("IgnoreHexproof".to_string()),
+                mode: StaticMode::IgnoreHexproof,
             }],
             None,
         );
@@ -1728,10 +1725,59 @@ mod tests {
     }
 
     #[test]
+    fn ignore_hexproof_bypasses_hexproof_from_quality() {
+        // CR 702.11e: "as though it didn't have hexproof" also bypasses
+        // hexproof from [quality].
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Red)));
+        let source_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        assert!(!can_target(
+            state.objects.get(&c1).unwrap(),
+            PlayerId(0),
+            source_id,
+            &state
+        ));
+
+        state.add_transient_continuous_effect(
+            source_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::IgnoreHexproof,
+            }],
+            None,
+        );
+
+        assert!(can_target(
+            state.objects.get(&c1).unwrap(),
+            PlayerId(0),
+            source_id,
+            &state
+        ));
+    }
+
+    #[test]
     fn ignore_hexproof_does_not_bypass_shroud() {
         // CR 702.18a: IgnoreHexproof bypasses hexproof only — never shroud.
-        use crate::types::ability::{ContinuousModification, Duration};
-        use crate::types::statics::StaticMode;
         let (mut state, _c0, c1) = setup_with_creatures();
         state
             .objects
@@ -1745,7 +1791,7 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificPlayer { id: PlayerId(0) },
             vec![ContinuousModification::AddStaticMode {
-                mode: StaticMode::Other("IgnoreHexproof".to_string()),
+                mode: StaticMode::IgnoreHexproof,
             }],
             None,
         );
