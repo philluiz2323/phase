@@ -69,6 +69,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
+            // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
+            // the attacker that must be blocked (Provoke). Enforced by direct
+            // match in combat.rs declare-blockers validation.
+            | StaticMode::MustBlockAttacker { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -10042,6 +10046,33 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 702.39a + CR 509.1b-c: data-carrying combat statics are enforced by
+    /// direct combat validation rather than exact registry-key lookup.
+    #[test]
+    fn data_carrying_combat_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MustBlockAttacker {
+                attacker: ObjectId(42),
+            })
+            .description("Target creature blocks this creature this turn if able.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan { max: 1 })
+                .affected(TargetFilter::SelfRef)
+                .description(
+                    "This creature can't be blocked by more than one creature.".to_string(),
+                ),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

@@ -1956,6 +1956,7 @@ mod tests {
             StaticMode::ExtraBlockers { count: Some(1) },
             StaticMode::MaxAttackersEachCombat { max: 2 },
             StaticMode::MaxBlockersEachCombat { max: 3 },
+            StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
             // Tier 1: keyword/evasion statics
