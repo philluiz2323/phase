@@ -6,14 +6,19 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::statics::StaticMode;
 
-/// CR 509.1c: Force block — the target creature must block this turn if able.
+/// CR 702.39a / CR 509.1c: Force block — the target creature must block the
+/// *specific* attacker (this effect's source) this turn if able.
 ///
-/// Grants the `MustBlock` static mode via a transient continuous effect that
-/// expires at end of turn. Combat validation in `validate_blockers()` enforces
-/// that creatures with `MustBlock` are assigned as blockers when legal.
+/// Grants the `MustBlockAttacker { attacker }` static mode via a transient
+/// continuous effect that expires at end of turn, where `attacker` is
+/// `ability.source_id` — the provoking creature ("…block **it** this turn if
+/// able"). Combat validation in `validate_blockers()` then requires the target
+/// to be declared as a blocker of *that* attacker when it can legally block it,
+/// rather than the attacker-agnostic generic `MustBlock`.
 ///
-/// Note: `MustBlock` (creature must block) is distinct from `MustBeBlocked`
-/// (creature must be blocked by others).
+/// Note: `MustBlock` (creature must block any attacker), `MustBlockAttacker`
+/// (creature must block one specific attacker), and `MustBeBlocked` (creature
+/// must be blocked by others) are three distinct requirements (CR 509.1c).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -27,14 +32,18 @@ pub fn resolve(
                 continue;
             }
 
-            // CR 509.1c: Grant MustBlock until end of turn via the layer system.
+            // CR 702.39a / CR 509.1c: Grant MustBlockAttacker bound to this
+            // effect's source (the provoking attacker) until end of turn, so the
+            // target must block that specific attacker — not any attacker.
             state.add_transient_continuous_effect(
                 ability.source_id,
                 ability.controller,
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: *obj_id },
                 vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBlock,
+                    mode: StaticMode::MustBlockAttacker {
+                        attacker: ability.source_id,
+                    },
                 }],
                 None,
             );
@@ -90,19 +99,20 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // Verify transient continuous effect was created
+        // Verify transient continuous effect was created, bound to the source
+        // (provoking attacker) rather than the attacker-agnostic MustBlock.
         assert!(
             state.transient_continuous_effects.iter().any(|ce| {
                 ce.modifications.iter().any(|m| {
                     matches!(
                         m,
                         ContinuousModification::AddStaticMode {
-                            mode: StaticMode::MustBlock,
-                        }
+                            mode: StaticMode::MustBlockAttacker { attacker },
+                        } if *attacker == source
                     )
                 })
             }),
-            "Should grant MustBlock static to target"
+            "Should grant MustBlockAttacker(source) static to target"
         );
 
         // Verify EffectResolved emitted
@@ -159,8 +169,8 @@ mod tests {
                     matches!(
                         m,
                         ContinuousModification::AddStaticMode {
-                            mode: StaticMode::MustBlock,
-                        }
+                            mode: StaticMode::MustBlockAttacker { attacker },
+                        } if *attacker == source
                     )
                 })
             })
