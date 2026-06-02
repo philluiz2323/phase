@@ -5,7 +5,9 @@ use nom::combinator::{all_consuming, map, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::animation::{animation_modifications, parse_animation_spec};
+use super::animation::{
+    animation_modifications_with_replacement, has_in_addition_to_other_types, parse_animation_spec,
+};
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
@@ -440,7 +442,7 @@ fn try_parse_subject_restriction_clause(
     build_restriction_clause(application, predicate)
 }
 
-/// CR 702.3b: "[subject] can attack [this turn] as though it didn't have defender"
+/// CR 702.3b: "[subject] can attack [this turn] as though it/they didn't have defender"
 /// Produces a GenericEffect with CanAttackWithDefender static mode.
 fn try_parse_can_attack_with_defender(
     text: &str,
@@ -449,7 +451,7 @@ fn try_parse_can_attack_with_defender(
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let pos = tp.find(" can attack")?;
-    if !lower.contains("as though it didn't have defender") {
+    if !is_can_attack_despite_defender_predicate(&lower[pos + 1..]) {
         return None;
     }
     let subject = text[..pos].trim();
@@ -547,6 +549,24 @@ pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
         tag(" "),
         parse_extra_blockers_count,
         parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+}
+
+/// CR 702.3b: predicate-only "can attack [this turn] as though [it|they]
+/// didn't have defender" — the subjectless conjunct left after the sequence
+/// splitter peels it off a "<subject> gets +N/-M ... and ..." compound. Mirrors
+/// `is_can_block_extra_predicate`; used by `combat_requirement_conjunct_prepend`
+/// to re-attach the subject so `try_parse_can_attack_with_defender` can fire.
+pub(super) fn is_can_attack_despite_defender_predicate(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("can attack"),
+        opt(tag(" this turn")),
+        tag(" as though "),
+        alt((tag("it"), tag("they"))),
+        tag(" didn't have defender"),
         opt(tag(".")),
     ))
     .parse(lower.trim())
@@ -1837,7 +1857,12 @@ fn build_become_clause(
 
     let (become_text, name_override) = strip_become_name_override(become_text);
     let animation = parse_animation_spec(&become_text, ctx)?;
-    let mut modifications = animation_modifications(&animation);
+    // CR 205.1a vs CR 205.1b: a "becomes a [type]" effect REPLACES the creature's
+    // subtypes (so e.g. a Human Soldier that becomes a Frog is only a Frog) unless
+    // it says "in addition to its other types", which stays additive. Mirrors the
+    // static type-change path's suffix detection.
+    let is_additive = has_in_addition_to_other_types(&become_text);
+    let mut modifications = animation_modifications_with_replacement(&animation, is_additive);
     for modification in parse_continuous_modifications(predicate) {
         if !modifications.contains(&modification) {
             modifications.push(modification);
@@ -1910,7 +1935,9 @@ fn try_parse_become_and_attack_if_able(
     let (animation_text, animation_duration) = super::strip_trailing_duration(animation_text);
     let animation_duration = animation_duration?;
     let animation = parse_animation_spec(animation_text, ctx)?;
-    let modifications = animation_modifications(&animation);
+    // CR 205.1a: non-additive "becomes a [type]" replaces subtypes.
+    let is_additive = has_in_addition_to_other_types(animation_text);
+    let modifications = animation_modifications_with_replacement(&animation, is_additive);
     if modifications.is_empty() {
         return None;
     }
@@ -1947,25 +1974,21 @@ fn try_parse_become_and_attack_if_able(
 }
 
 fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
-    alt((
-        value(
-            Duration::UntilEndOfTurn,
-            alt((
-                tag("attacks this turn if able"),
-                tag("attack this turn if able"),
-            )),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            alt((
-                tag("attacks this combat if able"),
-                tag("attack this combat if able"),
-                tag("attacks that combat if able"),
-                tag("attack that combat if able"),
-            )),
-        ),
-    ))
-    .parse(input)
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
+    // then map the phase clause to its duration ("this turn" → end of turn,
+    // "this/that combat" → end of combat).
+    let (rest, _) = alt((tag("attacks"), tag("attack"))).parse(input)?;
+    preceded(
+        tag(" "),
+        alt((
+            value(Duration::UntilEndOfTurn, tag("this turn if able")),
+            value(
+                Duration::UntilEndOfCombat,
+                alt((tag("this combat if able"), tag("that combat if able"))),
+            ),
+        )),
+    )
+    .parse(rest)
 }
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.
@@ -2830,6 +2853,30 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, ContinuousModification, Effect, TypeFilter};
     use crate::types::card_type::Supertype;
+
+    /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical
+    /// shape the sequence splitter can leave behind ("this turn" optional, both
+    /// "it"/"they" pronoun forms, optional trailing period) and rejects unrelated
+    /// combat predicates so it only re-attaches subjects for genuine
+    /// can-attack-despite-defender grants.
+    #[test]
+    fn is_can_attack_despite_defender_predicate_matches() {
+        assert!(is_can_attack_despite_defender_predicate(
+            "can attack this turn as though it didn't have defender"
+        ));
+        assert!(is_can_attack_despite_defender_predicate(
+            "can attack as though they didn't have defender"
+        ));
+        assert!(is_can_attack_despite_defender_predicate(
+            "can attack this turn as though it didn't have defender."
+        ));
+        // Negative: a bare "can attack" with no defender clause must not match.
+        assert!(!is_can_attack_despite_defender_predicate("can attack"));
+        // Negative: an extra-blocker grant belongs to the can-block predicate.
+        assert!(!is_can_attack_despite_defender_predicate(
+            "can block an additional creature"
+        ));
+    }
 
     /// CR 707.9 + CR 611.2b: Sarkhan, Soul Aflame's "have ~ become a copy of
     /// it until end of turn, except its name is ~ and it's legendary in

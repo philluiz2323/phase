@@ -1441,13 +1441,17 @@ pub(crate) fn resolve_multi_target_bounds(
         ));
     }
 
-    let min = resolve_multi_target_min(state, ability, spec);
+    let raw_min = resolve_multi_target_min(state, ability, spec);
     let raw_max = resolve_multi_target_max(state, ability, spec).unwrap_or(legal_target_count);
-    if raw_max < min {
-        return Err(EngineError::ActionNotAllowed(
-            "Multi-target maximum is below its minimum".to_string(),
-        ));
-    }
+    // CR 601.2c: A resolved variable maximum can legitimately fall below the
+    // spec's structural minimum. For "distribute X counters among any number of
+    // target creatures" (Grove's Bounty) the floor of 1 expresses "each chosen
+    // target must receive a counter", but that floor only applies when there is
+    // something to distribute — casting for X=0 distributes nothing, so the
+    // required target count collapses to 0. Clamping `min` to `raw_max` yields
+    // exactly `min(1, X)`: 1 when X >= 1, 0 when X = 0. A genuinely malformed
+    // static spec never reaches here (constructors keep min <= max).
+    let min = raw_min.min(raw_max);
     if legal_target_count < min {
         return Err(EngineError::ActionNotAllowed(
             "Not enough legal targets available".to_string(),
@@ -5420,6 +5424,42 @@ mod tests {
         assert!(
             slots.is_empty(),
             "typed linked-exile filters are resolved from source links, not chosen as targets"
+        );
+    }
+
+    #[test]
+    fn build_target_slots_skips_cast_from_hand_permission() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Card)
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::InZone { zone: Zone::Hand },
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Fixed { value: 4 },
+                            },
+                        ]),
+                ),
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert!(
+            slots.is_empty(),
+            "cast-from-hand permissions are resolution-time picks, not stack-time targets"
         );
     }
 
