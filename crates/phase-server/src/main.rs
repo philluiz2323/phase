@@ -3066,21 +3066,16 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = lobby_broker::guard_inbound(
-                &lobby_broker::LobbyClientMessage::CreateGameWithSettings {
-                    deck: deck.clone(),
-                    display_name: display_name.clone(),
-                    public,
-                    password: password.clone(),
+            if let Err(reason) = lobby_broker::guard_create_game_settings_inbound(
+                lobby_broker::CreateGameSettingsInbound {
+                    deck: &deck,
+                    display_name: &display_name,
+                    password: password.as_deref(),
                     timer_seconds,
                     player_count: requested_player_count,
-                    match_config,
-                    format_config: format_config.clone(),
-                    room_name: room_name.clone(),
+                    room_name: room_name.as_deref(),
                     host_peer_id: None,
                     draft_metadata: None,
-                    start_when_full,
-                    ranked,
                 },
             ) {
                 let msg = ServerMessage::Error { message: reason };
@@ -3730,13 +3725,6 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
 
-            if reject_joining_current_game(identity, &game_code, socket)
-                .await
-                .is_err()
-            {
-                return;
-            }
-
             // --- Lobby-only broker path ------------------------------
             //
             // The broker runs the build-commit + password gates, the
@@ -3771,19 +3759,26 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = lobby_broker::guard_inbound(
-                &lobby_broker::LobbyClientMessage::JoinGameWithPassword {
-                    game_code: game_code.clone(),
-                    deck: deck.clone(),
-                    display_name: display_name.clone(),
-                    password: password.clone(),
-                    reservation_token: reservation_token.clone(),
+            if let Err(reason) = lobby_broker::guard_join_game_with_password_inbound(
+                lobby_broker::JoinGameWithPasswordInbound {
+                    game_code: &game_code,
+                    deck: &deck,
+                    display_name: &display_name,
+                    password: password.as_deref(),
+                    reservation_token: reservation_token.as_deref(),
                 },
             ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
+                return;
+            }
+
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
                 return;
             }
 
