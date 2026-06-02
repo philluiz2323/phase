@@ -586,24 +586,6 @@ pub fn validate_blockers_for_player(
     let mut blockers_per_attacker: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     let mut attackers_per_blocker: HashMap<ObjectId, u32> = HashMap::new();
 
-    // CR 506.5 + CR 509.1b: A creature with "can't block alone" may be declared
-    // as a blocker only if it isn't the sole creature this player declares as a
-    // blocker this step. Two such creatures may block together.
-    {
-        let distinct_blockers: std::collections::HashSet<ObjectId> =
-            assignments.iter().map(|&(blocker, _)| blocker).collect();
-        if distinct_blockers.len() == 1 {
-            let blocker_id = *distinct_blockers.iter().next().expect("len checked");
-            if let Some(obj) = state.objects.get(&blocker_id) {
-                if super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::CantBlockAlone)
-                {
-                    return Err(format!("{blocker_id:?} can't block alone (CR 506.5)"));
-                }
-            }
-        }
-    }
-
     for &(blocker_id, attacker_id) in assignments {
         let blocker = state
             .objects
@@ -834,6 +816,20 @@ pub fn validate_blockers_for_player(
             .or_default()
             .push(blocker_id);
         *attackers_per_blocker.entry(blocker_id).or_default() += 1;
+    }
+
+    // CR 506.5 + CR 509.1b: A creature with "can't block alone" may be declared
+    // as a blocker only if it isn't the sole creature this player declares as a
+    // blocker this step. Two such creatures may block together.
+    if attackers_per_blocker.len() == 1 {
+        let (&blocker_id, _) = attackers_per_blocker.iter().next().expect("len checked");
+        if let Some(obj) = state.objects.get(&blocker_id) {
+            if super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CantBlockAlone)
+            {
+                return Err(format!("{blocker_id:?} can't block alone (CR 506.5)"));
+            }
+        }
     }
 
     // CR 509.1a + CR 509.1b: Enforce per-blocker limit on how many attackers it can block.
