@@ -484,6 +484,19 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
+    // CR 506.5 + CR 508.1a + CR 509.1b: "can't attack or block alone" (Mogg
+    // Flunkies) imposes both the attack-alone and block-alone restrictions.
+    if nom_primitives::scan_contains(&lower, "can't attack or block alone") {
+        return vec![
+            StaticDefinition::new(StaticMode::CantAttackAlone)
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+            StaticDefinition::new(StaticMode::CantBlockAlone)
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+        ];
+    }
+
     // CR 119.7 + CR 119.8: "[scope] life total can't change" — bidirectional
     // life-lock. Emits both CantGainLife and CantLoseLife with the same
     // player-scope filter (Platinum Emperion: "Your life total can't change.";
