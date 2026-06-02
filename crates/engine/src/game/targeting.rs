@@ -1330,13 +1330,24 @@ fn can_target(
     if obj.has_keyword(&Keyword::Shroud) {
         return false;
     }
+    // CR 702.11e: An "ignore hexproof" effect (Detection Tower) lets the targeting
+    // source's controller target a permanent "as though it didn't have hexproof".
+    // It bypasses Hexproof / Hexproof from [quality] only — never Shroud.
+    let ignores_hexproof = crate::game::static_abilities::player_has_static_other(
+        state,
+        source_controller,
+        "IgnoreHexproof",
+    );
     // CR 702.11a: Hexproof prevents targeting by opponents.
-    if obj.has_keyword(&Keyword::Hexproof) && obj.controller != source_controller {
+    if !ignores_hexproof
+        && obj.has_keyword(&Keyword::Hexproof)
+        && obj.controller != source_controller
+    {
         return false;
     }
     // CR 702.11d: "Hexproof from [quality]" prevents targeting by opponents' sources
     // with the matching quality. CR 702.11e: IgnoreHexproof bypasses this.
-    if obj.controller != source_controller {
+    if !ignores_hexproof && obj.controller != source_controller {
         for kw in &obj.keywords {
             if let Keyword::HexproofFrom(ref filter) = kw {
                 if hexproof_filter_matches(filter, source_id, state) {
@@ -1675,6 +1686,74 @@ mod tests {
 
         let targets = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c1)));
+    }
+
+    #[test]
+    fn ignore_hexproof_lets_controller_target_opponents_hexproof_creature() {
+        // CR 702.11e: Detection Tower — while the targeting player has an active
+        // "ignore hexproof" effect, opponents' hexproof permanents are legal targets.
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::statics::StaticMode;
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+
+        // Baseline: P0 can't target P1's hexproof creature.
+        assert!(
+            !find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99))
+                .contains(&TargetRef::Object(c1))
+        );
+
+        // Grant P0 IgnoreHexproof (the player-scoped transient a bypass effect creates).
+        state.add_transient_continuous_effect(
+            ObjectId(99),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("IgnoreHexproof".to_string()),
+            }],
+            None,
+        );
+
+        // Now P0 may target it; the grant is player-scoped to P0.
+        assert!(
+            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99))
+                .contains(&TargetRef::Object(c1))
+        );
+    }
+
+    #[test]
+    fn ignore_hexproof_does_not_bypass_shroud() {
+        // CR 702.18a: IgnoreHexproof bypasses hexproof only — never shroud.
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::statics::StaticMode;
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shroud);
+        state.add_transient_continuous_effect(
+            ObjectId(99),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("IgnoreHexproof".to_string()),
+            }],
+            None,
+        );
+
+        assert!(
+            !find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99))
+                .contains(&TargetRef::Object(c1))
+        );
     }
 
     #[test]
