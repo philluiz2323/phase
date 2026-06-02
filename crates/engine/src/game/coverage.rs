@@ -69,6 +69,9 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
+            // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
+            // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
+            | StaticMode::CantBeBlockedByMoreThan { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
