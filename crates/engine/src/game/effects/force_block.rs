@@ -6,15 +6,12 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::statics::StaticMode;
 
-/// CR 702.39a / CR 509.1c: Force block — the target creature must block the
-/// *specific* attacker (this effect's source) this turn if able.
+/// CR 509.1c: Force block — the target creature must block this turn if able.
 ///
-/// Grants the `MustBlockAttacker { attacker }` static mode via a transient
-/// continuous effect that expires at end of turn, where `attacker` is
-/// `ability.source_id` — the provoking creature ("…block **it** this turn if
-/// able"). Combat validation in `validate_blockers()` then requires the target
-/// to be declared as a blocker of *that* attacker when it can legally block it,
-/// rather than the attacker-agnostic generic `MustBlock`.
+/// If the effect source is currently an attacker, this is the Provoke/source-
+/// referential shape (CR 702.39a: "block this creature if able"), so grant
+/// `MustBlockAttacker { attacker: source }`. Otherwise preserve the generic
+/// attacker-agnostic `MustBlock` shape for "blocks this turn if able".
 ///
 /// Note: `MustBlock` (creature must block any attacker), `MustBlockAttacker`
 /// (creature must block one specific attacker), and `MustBeBlocked` (creature
@@ -24,6 +21,24 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let source_is_active_attacker = state.combat.as_ref().is_some_and(|combat| {
+        combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == ability.source_id)
+    });
+    let mode = if source_is_active_attacker {
+        // CR 702.39a + CR 509.1c: Provoke/source-referential force-block
+        // effects require blocking this specific attacking source.
+        StaticMode::MustBlockAttacker {
+            attacker: ability.source_id,
+        }
+    } else {
+        // CR 509.1c: Generic "blocks this turn if able" effects only require
+        // blocking some legal attacker.
+        StaticMode::MustBlock
+    };
+
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
             // CR 509.1c: Requirements that creatures must block are checked during
@@ -32,19 +47,12 @@ pub fn resolve(
                 continue;
             }
 
-            // CR 702.39a / CR 509.1c: Grant MustBlockAttacker bound to this
-            // effect's source (the provoking attacker) until end of turn, so the
-            // target must block that specific attacker — not any attacker.
             state.add_transient_continuous_effect(
                 ability.source_id,
                 ability.controller,
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: *obj_id },
-                vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBlockAttacker {
-                        attacker: ability.source_id,
-                    },
-                }],
+                vec![ContinuousModification::AddStaticMode { mode: mode.clone() }],
                 None,
             );
         }
@@ -60,6 +68,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
@@ -78,7 +87,53 @@ mod tests {
     }
 
     #[test]
-    fn force_block_grants_must_block_static() {
+    fn force_block_without_active_source_attacker_grants_generic_must_block() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = make_force_block_ability(source, target);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.transient_continuous_effects.iter().any(|ce| {
+                ce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MustBlock,
+                        }
+                    )
+                })
+            }),
+            "generic force block should grant attacker-agnostic MustBlock"
+        );
+
+        // Verify EffectResolved emitted
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ForceBlock,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn force_block_active_source_attacker_grants_must_block_attacker() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -94,13 +149,15 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(source, PlayerId(1))],
+            ..Default::default()
+        });
 
         let ability = make_force_block_ability(source, target);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // Verify transient continuous effect was created, bound to the source
-        // (provoking attacker) rather than the attacker-agnostic MustBlock.
         assert!(
             state.transient_continuous_effects.iter().any(|ce| {
                 ce.modifications.iter().any(|m| {
@@ -112,17 +169,8 @@ mod tests {
                     )
                 })
             }),
-            "Should grant MustBlockAttacker(source) static to target"
+            "source-referential force block should bind to the active attacker"
         );
-
-        // Verify EffectResolved emitted
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::EffectResolved {
-                kind: EffectKind::ForceBlock,
-                ..
-            }
-        )));
     }
 
     #[test]
@@ -137,14 +185,14 @@ mod tests {
         );
         let target1 = create_object(
             &mut state,
-            CardId(2),
+            CardId(3),
             PlayerId(1),
             "Bear1".to_string(),
             Zone::Battlefield,
         );
         let target2 = create_object(
             &mut state,
-            CardId(3),
+            CardId(4),
             PlayerId(1),
             "Bear2".to_string(),
             Zone::Battlefield,
@@ -169,8 +217,8 @@ mod tests {
                     matches!(
                         m,
                         ContinuousModification::AddStaticMode {
-                            mode: StaticMode::MustBlockAttacker { attacker },
-                        } if *attacker == source
+                            mode: StaticMode::MustBlock,
+                        }
                     )
                 })
             })
