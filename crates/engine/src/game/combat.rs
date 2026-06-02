@@ -1685,6 +1685,45 @@ pub fn declare_attackers(
         }
     }
 
+    // CR 508.1d: MustAttackPlayer — a creature forced to attack a SPECIFIC player
+    // ("target creature attacks you this combat if able"; Alluring Siren) must be
+    // declared attacking that player, or a planeswalker that player controls, when
+    // it can legally attack them. Mirrors the goad redirect above but pins a
+    // specific player rather than "anyone but the goader".
+    for (attacker_id, target) in attacks {
+        let Some(obj) = state.objects.get(attacker_id) else {
+            continue;
+        };
+        let required: Vec<PlayerId> =
+            super::functioning_abilities::active_static_definitions(state, obj)
+                .filter_map(|sd| match sd.mode {
+                    StaticMode::MustAttackPlayer { player } => Some(player),
+                    _ => None,
+                })
+                .collect();
+        for req_player in required {
+            // Only enforce when the creature can legally attack the required player.
+            if !attackable_players.contains(&req_player) {
+                continue;
+            }
+            // Attacking the required player directly, or a planeswalker they
+            // control, satisfies the requirement (CR 508.1d).
+            let attacks_required_player = match target {
+                AttackTarget::Player(pid) => *pid == req_player,
+                AttackTarget::Planeswalker(pw_id) => state
+                    .objects
+                    .get(pw_id)
+                    .is_some_and(|pw| pw.controller == req_player),
+                AttackTarget::Battle(_) => false,
+            };
+            if !attacks_required_player {
+                return Err(format!(
+                    "{attacker_id:?} must attack {req_player:?} this combat if able (CR 508.1d)"
+                ));
+            }
+        }
+    }
+
     // CR 508.1f: Tap attackers. CR 508.1k: Creatures become attacking creatures.
     for &id in &attacker_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
@@ -5090,6 +5129,43 @@ mod tests {
             &mut vec![],
         );
         assert!(attacks_other_player.is_ok());
+    }
+
+    #[test]
+    fn must_attack_player_enforces_specific_player() {
+        // CR 508.1d: a creature with MustAttackPlayer{P2} must attack P2 (or a
+        // planeswalker P2 controls) when P2 is a legal target; attacking a
+        // different player is illegal.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        let attacker = create_creature(&mut state, PlayerId(0), "Lured Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: PlayerId(2),
+            }));
+
+        // Attacking the wrong player (P1) while P2 is a legal target: illegal.
+        let wrong = declare_attackers(
+            &mut state,
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(wrong.is_err());
+        assert!(wrong.unwrap_err().contains("must attack"));
+
+        // Attacking the required player (P2): legal.
+        let right = declare_attackers(
+            &mut state,
+            &[(attacker, AttackTarget::Player(PlayerId(2)))],
+            &mut vec![],
+        );
+        assert!(right.is_ok());
     }
 
     #[test]
