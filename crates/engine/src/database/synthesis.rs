@@ -234,8 +234,8 @@ impl KeywordTriggerInstaller {
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
-            // CR 702.25a/b: Flanking — one becomes-blocked debuff trigger per
-            // instance (each instance triggers separately).
+            // CR 702.25a: Flanking — a becomes-blocked debuff trigger. CR 702.25b:
+            // each instance triggers separately (one trigger per instance).
             Keyword::Flanking => vec![build_flanking_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
@@ -3112,6 +3112,7 @@ fn build_flanking_trigger() -> TriggerDefinition {
 /// Used by `RemoveKeyword` symmetric removal.
 fn is_flanking_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::PumpAll {
@@ -8116,6 +8117,13 @@ mod exalted_synthesis_tests {
             .count();
         assert_eq!(count, 2);
     }
+}
+
+#[cfg(test)]
+mod flanking_synthesis_tests {
+    //! CR 702.25a shape tests: a self-scoped BecomesBlocked trigger whose
+    //! `Effect::PumpAll(-1/-1)` debuffs blocking creatures without flanking.
+    use super::*;
 
     #[test]
     fn synthesize_flanking_adds_becomes_blocked_debuff_trigger() {
