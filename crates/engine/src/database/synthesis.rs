@@ -231,8 +231,8 @@ impl KeywordTriggerInstaller {
             // static-on-battlefield ability that fires from the granted-from
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
-            // CR 702.45a/b: Bushido N — fires on both "blocks" and "becomes
-            // blocked", each instance separately; emit one trigger per event.
+            // CR 702.45a: Bushido N — fires on both "blocks" and "becomes
+            // blocked". CR 702.45b: each instance separately; one trigger per event.
             Keyword::Bushido(n) => vec![
                 build_bushido_trigger(TriggerMode::Blocks, *n),
                 build_bushido_trigger(TriggerMode::BecomesBlocked, *n),
@@ -276,7 +276,7 @@ impl KeywordTriggerInstaller {
             // strips the Graft enters-trigger when the granted keyword is
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
-            Keyword::Bushido(_) => is_bushido_trigger(trigger),
+            Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
@@ -3101,17 +3101,22 @@ fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
         ))
 }
 
-/// CR 702.45a: A Bushido-shaped trigger — a self-scoped block / becomes-blocked
-/// trigger that pumps the triggering source. Used by `RemoveKeyword` symmetric
-/// removal so a granted-then-removed Bushido strips its triggers.
-fn is_bushido_trigger(t: &TriggerDefinition) -> bool {
+/// CR 702.45a: A Bushido `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// block / becomes-blocked trigger that pumps the triggering source +n/+n. Used
+/// by `RemoveKeyword` symmetric removal so a granted-then-removed `Bushido(n)`
+/// strips exactly its own triggers — parameterized by `n` (and asserting
+/// `valid_card`) so it never matches a different Bushido level or a coincidental
+/// printed block-pump on the same face.
+fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
     matches!(t.mode, TriggerMode::Blocks | TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::Pump {
+                power: PtValue::Fixed(p),
+                toughness: PtValue::Fixed(tough),
                 target: TargetFilter::TriggeringSource,
-                ..
-            })
+            }) if *p == n as i32 && *tough == n as i32
         )
 }
 
@@ -8108,6 +8113,13 @@ mod exalted_synthesis_tests {
             .count();
         assert_eq!(count, 2);
     }
+}
+
+#[cfg(test)]
+mod bushido_synthesis_tests {
+    //! CR 702.45a shape tests: two self-scoped triggers (Blocks +
+    //! BecomesBlocked), each an `Effect::Pump` on `TriggeringSource` of +N/+N.
+    use super::*;
 
     #[test]
     fn synthesize_bushido_adds_block_and_becomes_blocked_triggers() {
@@ -8120,7 +8132,7 @@ mod exalted_synthesis_tests {
         let bushido: Vec<_> = face
             .triggers
             .iter()
-            .filter(|t| is_bushido_trigger(t))
+            .filter(|t| is_bushido_trigger(t, 2))
             .collect();
         assert_eq!(bushido.len(), 2, "blocks + becomes-blocked");
         assert!(bushido
@@ -8154,7 +8166,7 @@ mod exalted_synthesis_tests {
         assert_eq!(
             face.triggers
                 .iter()
-                .filter(|t| is_bushido_trigger(t))
+                .filter(|t| is_bushido_trigger(t, 1))
                 .count(),
             2,
             "two triggers (blocks + becomes-blocked), deduped across passes"
@@ -8162,7 +8174,7 @@ mod exalted_synthesis_tests {
 
         let mut bare = CardFace::default();
         synthesize_bushido(&mut bare);
-        assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t)));
+        assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t, 1)));
     }
 }
 
