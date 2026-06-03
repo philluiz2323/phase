@@ -9070,6 +9070,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
         {
             *target = TargetFilter::ParentTarget;
@@ -10173,6 +10174,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Suspect { target }
         | Effect::Goad { target }
         | Effect::Mill { target, .. }
@@ -12217,6 +12219,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::PutCounter { target, .. }
@@ -12443,6 +12446,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
@@ -26848,6 +26852,23 @@ mod tests {
                 }
             ),
             "Expected ForceBlock with typed target, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn force_attack_you_this_combat_targets_creature() {
+        let e = parse_effect("Target creature attacks you this combat if able");
+        assert!(
+            matches!(
+                e,
+                Effect::ForceAttack {
+                    target: TargetFilter::Typed(_),
+                    required_player: TargetFilter::Controller,
+                    duration: Duration::UntilEndOfCombat,
+                }
+            ),
+            "Expected ForceAttack with typed target and controller requirement, got {:?}",
             e
         );
     }

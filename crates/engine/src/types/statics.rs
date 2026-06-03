@@ -593,9 +593,9 @@ pub enum StaticMode {
     /// runtime-implemented; other arms are inert.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
-    /// CR 508.1d: This creature must attack a *specific* player — or a
-    /// planeswalker that player controls — if able ("target creature attacks you
-    /// this combat if able"; Alluring Siren, Dulcet Sirens). Unlike the generic
+    /// CR 508.1d: This creature must attack a *specific* player if able ("target
+    /// creature attacks you this combat if able"; Alluring Siren, Dulcet Sirens).
+    /// Unlike the generic
     /// [`MustAttack`] (attack any defender), this carries the `PlayerId` that must
     /// be attacked. Data-carrying variant — not registry-registered (see
     /// `coverage::is_data_carrying_static`); enforced by direct pattern-match in

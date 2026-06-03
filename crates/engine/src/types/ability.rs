@@ -6314,6 +6314,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
+    ForceAttack {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default = "default_target_filter_controller")]
+        required_player: TargetFilter,
+        #[serde(default = "default_duration_until_end_of_turn")]
+        duration: Duration,
+    },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
     /// CR 702.xxx: Prepare (Strixhaven) — mark the target creature as prepared.
@@ -7141,6 +7150,10 @@ fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
 }
 
+fn default_duration_until_end_of_turn() -> Duration {
+    Duration::UntilEndOfTurn
+}
+
 fn default_comparator_ge() -> Comparator {
     Comparator::GE
 }
@@ -7753,6 +7766,7 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
+            | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
             | Effect::CastFromZone { target, .. }
@@ -8072,6 +8086,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PhaseOut { .. } => "PhaseOut",
         Effect::PhaseIn { .. } => "PhaseIn",
         Effect::ForceBlock { .. } => "ForceBlock",
+        Effect::ForceAttack { .. } => "ForceAttack",
         Effect::SolveCase => "SolveCase",
         Effect::BecomePrepared { .. } => "BecomePrepared",
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
@@ -8254,6 +8269,7 @@ pub enum EffectKind {
     PhaseOut,
     PhaseIn,
     ForceBlock,
+    ForceAttack,
     SolveCase,
     /// CR 702.xxx: Prepare (Strixhaven) — mark target creature as prepared.
     BecomePrepared,
@@ -8447,6 +8463,7 @@ impl From<&Effect> for EffectKind {
             Effect::PhaseOut { .. } => EffectKind::PhaseOut,
             Effect::PhaseIn { .. } => EffectKind::PhaseIn,
             Effect::ForceBlock { .. } => EffectKind::ForceBlock,
+            Effect::ForceAttack { .. } => EffectKind::ForceAttack,
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::BecomePrepared { .. } => EffectKind::BecomePrepared,
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,

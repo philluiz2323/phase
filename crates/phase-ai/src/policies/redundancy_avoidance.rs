@@ -387,6 +387,7 @@ fn redundancy_delta(
         | Effect::PhaseOut { .. }
         | Effect::PhaseIn { .. }
         | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
