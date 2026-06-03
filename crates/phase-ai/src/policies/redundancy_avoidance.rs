@@ -349,6 +349,7 @@ fn redundancy_delta(
         | Effect::BecomeMonarch
         | Effect::Proliferate
         | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
         | Effect::Vote { .. }
@@ -437,6 +438,7 @@ fn redundancy_delta(
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
@@ -500,6 +502,9 @@ fn redundancy_delta(
         // between a player's life and the source's stat — no static redundancy
         // signal (it never "does nothing" the way a duplicate keyword grant does).
         | Effect::ExchangeLifeWithStat { .. }
+        // CR 701.51 + CR 701.52: Attraction open/visit — deck state dependent.
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters => None,
     }
 }

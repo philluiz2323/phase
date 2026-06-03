@@ -591,10 +591,16 @@ pub enum Keyword {
         cost: ManaCost,
     },
     Fortify(ManaCost),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler. CR 702.160a: Prototype — alt-cast using the
-    /// secondary P/T and mana cost characteristics.
-    Prototype(ManaCost),
+    /// CR 702.160a: Prototype — a player may cast this spell prototyped; if
+    /// they do, the alternative power, toughness, and mana cost characteristics
+    /// are used.
+    Prototype {
+        cost: ManaCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness: Option<i32>,
+    },
     Plot(ManaCost),
     Craft(ManaCost),
     Offspring(ManaCost),
@@ -1071,7 +1077,7 @@ impl Keyword {
             | Keyword::Nightbound
             | Keyword::Overload(_)
             | Keyword::Poisonous(_)
-            | Keyword::Prototype(_)
+            | Keyword::Prototype { .. }
             | Keyword::Provoke
             | Keyword::Prowl(_)
             | Keyword::Ravenous
@@ -1093,6 +1099,36 @@ impl Keyword {
             | Keyword::Typecycling { .. }
             | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
+    }
+
+    /// CR 113.2c: keywords whose multiple instances each function separately AND
+    /// are printed in Oracle text as repeated bare words, so every printed
+    /// occurrence must survive as a distinct `Keyword` on the card face (MTGJSON
+    /// dedupes them to one). Two distinct runtime consumption shapes both rely on
+    /// the surviving instance count:
+    ///
+    /// - Cascade (CR 702.85c: each instance triggers separately) / Storm
+    ///   (CR 702.40b: each instance triggers separately) — stack-functioning
+    ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
+    ///   loops in `game/triggers.rs`.
+    /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
+    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
+    ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
+    ///   installed per face `Keyword` instance by
+    ///   `KeywordTriggerInstaller::install_matching`, invoked from `synthesize_all`.
+    ///
+    /// Returns `false` for everything else, including:
+    /// - CR 702.44d Sunburst — also "works separately" per instance, but is a
+    ///   STATIC ability never printed as a repeated bare word and not
+    ///   instance-counted, so it is out of this class.
+    /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
+    ///   instances would be inert (separate deeper bug, not addressed here).
+    pub fn instances_function_separately(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Cascade | Keyword::Storm | Keyword::Myriad | Keyword::Exalted
+        )
     }
 }
 
@@ -1607,7 +1643,13 @@ impl FromStr for Keyword {
                     // Fall through to Unknown
                 }
                 "fortify" => return Ok(Keyword::Fortify(parse_keyword_mana_cost(p))),
-                "prototype" => return Ok(Keyword::Prototype(parse_keyword_mana_cost(p))),
+                "prototype" => {
+                    return Ok(Keyword::Prototype {
+                        cost: parse_keyword_mana_cost(p),
+                        power: None,
+                        toughness: None,
+                    });
+                }
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
@@ -1624,6 +1666,7 @@ impl FromStr for Keyword {
                     });
                 }
                 "levelup" | "level up" => return Ok(Keyword::LevelUp(parse_keyword_mana_cost(p))),
+                "specialize" => return Ok(Keyword::Specialize(parse_keyword_mana_cost(p))),
                 "warp" => return Ok(Keyword::Warp(parse_keyword_mana_cost(p))),
                 "sneak" => return Ok(Keyword::Sneak(parse_keyword_mana_cost(p))),
                 "web-slinging" | "webslinging" => {
@@ -2278,7 +2321,27 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             Ok(Keyword::Awaken { count, cost })
         }
         "Fortify" => Ok(Keyword::Fortify(mana(data)?)),
-        "Prototype" => Ok(Keyword::Prototype(mana(data)?)),
+        "Prototype" => {
+            if let Some(cost_val) = data.get("cost") {
+                let cost = mana(cost_val)?;
+                let power = data.get("power").and_then(|v| v.as_i64()).map(|v| v as i32);
+                let toughness = data
+                    .get("toughness")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32);
+                Ok(Keyword::Prototype {
+                    cost,
+                    power,
+                    toughness,
+                })
+            } else {
+                Ok(Keyword::Prototype {
+                    cost: mana(data)?,
+                    power: None,
+                    toughness: None,
+                })
+            }
+        }
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
         "Craft" => Ok(Keyword::Craft(mana(data)?)),
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
