@@ -3084,10 +3084,17 @@ fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
 /// Scoped to the source creature via `valid_card` (the field block matchers read)
 /// and pumps `TriggeringSource`, mirroring `build_exalted_trigger`.
 fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
+    // CR 702.45a: "it gets +N/+N" — the Bushido creature itself. Target `SelfRef`,
+    // NOT `TriggeringSource`: for a `BecomesBlocked` event the triggering source
+    // resolves to the *blocker* (ambiguous/None with multiple blockers), so
+    // `TriggeringSource` would pump the wrong creature. The pending trigger's
+    // own source is this creature, so `SelfRef` is correct on both the blocks
+    // and becomes-blocked halves. Mirrors the self-trigger Dethrone, not Exalted
+    // (which watches other attacking creatures).
     let pump = Effect::Pump {
         power: PtValue::Fixed(n as i32),
         toughness: PtValue::Fixed(n as i32),
-        target: TargetFilter::TriggeringSource,
+        target: TargetFilter::SelfRef,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
         "CR 702.45a: Bushido {n} — +{n}/+{n} until end of turn"
@@ -3115,7 +3122,7 @@ fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
             Some(Effect::Pump {
                 power: PtValue::Fixed(p),
                 toughness: PtValue::Fixed(tough),
-                target: TargetFilter::TriggeringSource,
+                target: TargetFilter::SelfRef,
             }) if *p == n as i32 && *tough == n as i32
         )
 }
@@ -8153,7 +8160,7 @@ mod bushido_synthesis_tests {
             };
             assert!(matches!(power, PtValue::Fixed(2)));
             assert!(matches!(toughness, PtValue::Fixed(2)));
-            assert!(matches!(target, TargetFilter::TriggeringSource));
+            assert!(matches!(target, TargetFilter::SelfRef));
         }
     }
 
