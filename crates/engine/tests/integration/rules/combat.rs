@@ -58,7 +58,8 @@ fn bushido_becomes_blocked_pumps_attacker_not_blocker() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker_id = scenario
-        .add_creature_from_oracle(P0, "Ronin", 2, 2, "Bushido 2")
+        .add_creature(P0, "Ronin", 2, 2)
+        .from_oracle_text_with_keywords(&["bushido"], "Bushido 2")
         .id();
     let blocker_id = scenario.add_creature(P1, "Bear", 2, 2).id();
     let mut runner = scenario.build();
