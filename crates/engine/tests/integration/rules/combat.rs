@@ -52,6 +52,41 @@ fn blocked_creature_and_blocker_exchange_damage() {
     );
 }
 
+/// CR 702.45a: Bushido pumps the Bushido creature when it becomes blocked.
+#[test]
+fn bushido_becomes_blocked_pumps_attacker_not_blocker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = scenario
+        .add_creature(P0, "Ronin", 2, 2)
+        .with_keyword(Keyword::Bushido(2))
+        .id();
+    let blocker_id = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+        })
+        .expect("Bushido creature should be able to attack");
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker_id, attacker_id)],
+        })
+        .expect("blocker should be able to block the Bushido creature");
+
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "becomes-blocked Bushido trigger should be on the stack"
+    );
+    runner.resolve_top();
+
+    runner.assert_power_toughness(attacker_id, 4, 4);
+    runner.assert_power_toughness(blocker_id, 2, 2);
+}
+
 #[test]
 fn decayed_attacker_sacrifices_at_end_of_combat() {
     let mut scenario = GameScenario::new();

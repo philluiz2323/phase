@@ -3144,7 +3144,7 @@ fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
 /// CR 702.45a: Build one Bushido self-trigger for the given block event
 /// (`Blocks` or `BecomesBlocked`): "this creature gets +N/+N until end of turn."
 /// Scoped to the source creature via `valid_card` (the field block matchers read)
-/// and pumps `TriggeringSource`, mirroring `build_exalted_trigger`.
+/// and pumps `SelfRef`, mirroring self-trigger handling in `build_dethrone_trigger`.
 fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
     // CR 702.45a: "it gets +N/+N" — the Bushido creature itself. Target `SelfRef`,
     // NOT `TriggeringSource`: for a `BecomesBlocked` event the triggering source
@@ -3171,7 +3171,7 @@ fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
 }
 
 /// CR 702.45a: A Bushido `n` trigger — a self-scoped (`valid_card: SelfRef`)
-/// block / becomes-blocked trigger that pumps the triggering source +n/+n. Used
+/// block / becomes-blocked trigger that pumps the source creature +n/+n. Used
 /// by `RemoveKeyword` symmetric removal so a granted-then-removed `Bushido(n)`
 /// strips exactly its own triggers — parameterized by `n` (and asserting
 /// `valid_card`) so it never matches a different Bushido level or a coincidental
@@ -8203,7 +8203,7 @@ mod exalted_synthesis_tests {
 #[cfg(test)]
 mod bushido_synthesis_tests {
     //! CR 702.45a shape tests: two self-scoped triggers (Blocks +
-    //! BecomesBlocked), each an `Effect::Pump` on `TriggeringSource` of +N/+N.
+    //! BecomesBlocked), each an `Effect::Pump` on `SelfRef` of +N/+N.
     use super::*;
 
     #[test]
