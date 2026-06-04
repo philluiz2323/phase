@@ -23892,6 +23892,63 @@ mod tests {
     }
 
     #[test]
+    fn distribute_x_counters_among_any_number_allows_zero_targets() {
+        let clause = parse_effect_clause(
+            "distribute X +1/+1 counters among any number of target creatures you control",
+            &mut ParseContext::default(),
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 0 },
+                x.clone(),
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ref count,
+                    target: TargetFilter::Typed(_),
+                } if *count == x
+            ),
+            "Expected X-count targeted PutCounter with multi_target, got {:?}",
+            clause.effect
+        );
+    }
+
+    #[test]
+    fn distribute_fixed_counters_among_any_number_requires_one_target() {
+        let clause = parse_effect_clause(
+            "distribute two +1/+1 counters among any number of target creatures you control",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 1 },
+                QuantityExpr::Fixed { value: 2 },
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+    }
+
+    #[test]
     fn distribute_counters_among_up_to_two_target_creatures_is_multi_targeted() {
         let clause = parse_effect_clause(
             "distribute two +1/+1 counters among up to two target creatures",
@@ -38922,6 +38979,56 @@ mod tests {
         assert!(properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
+    }
+
+    /// CR 400.1 + CR 108.3 — Aether Vial class: "put a creature card ... from
+    /// your hand onto the battlefield" must scope the candidate set to the
+    /// controller's hand (`controller == Some(ControllerRef::You)`), not to
+    /// every player's hand. Without the controller scope the resolver collects
+    /// hand cards from both players, letting you put an opponent's creatures
+    /// onto the battlefield and revealing their hand (issue #1980).
+    ///
+    /// This is a building-block assertion on the produced `ChangeZone` target
+    /// filter, not a single-card check: every "<filter> from your hand onto the
+    /// battlefield" effect shares this code path. The dynamic interior clause
+    /// ("with mana value equal to the number of charge counters on this
+    /// artifact") is what previously displaced the "from your hand" zone suffix
+    /// past the contiguous type-phrase parse, dropping the controller scope.
+    #[test]
+    fn put_zone_change_from_your_hand_scopes_to_controller() {
+        // Self-references ("this artifact") are normalized to `~` before the
+        // effect parser runs, so the dynamic mana-value clause reaches this
+        // path as "the number of charge counters on ~ from your hand".
+        let text = "put a creature card with mana value equal to the number of charge counters on ~ from your hand onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Aether Vial put-from-hand");
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:?}");
+        };
+        assert_eq!(destination, Zone::Battlefield);
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected typed hand filter, got {target:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must restrict to the hand zone, got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::You),
+            "\"from your hand\" must scope candidates to the controller's hand, got {:?}",
+            typed.controller
+        );
     }
 
     /// CR 508.4 + CR 614.1 — Kaalia of the Vast: "put X from your hand onto
