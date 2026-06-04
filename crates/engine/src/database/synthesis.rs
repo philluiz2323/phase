@@ -2611,6 +2611,8 @@ pub fn synthesize_unleash(face: &mut CardFace) {
 }
 
 fn build_unleash_replacement() -> ReplacementDefinition {
+    // CR 702.98a: "You may have this permanent enter with an additional +1/+1
+    // counter on it."
     let counter_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
@@ -2660,7 +2662,11 @@ fn is_unleash_replacement(replacement: &ReplacementDefinition) -> bool {
 }
 
 fn build_unleash_cant_block_static() -> StaticDefinition {
+    // CR 702.98a: "This permanent can't block as long as it has a +1/+1 counter on
+    // it." Self-static (`affected: SelfRef`) gated on the creature carrying any
+    // +1/+1 counter, mirroring the Demon Wall self-static (combat.rs).
     StaticDefinition::new(StaticMode::CantBlock)
+        .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::HasCounters {
             counters: CounterMatch::OfType(CounterType::Plus1Plus1),
             minimum: 1,
@@ -2671,6 +2677,7 @@ fn build_unleash_cant_block_static() -> StaticDefinition {
 
 fn is_unleash_cant_block_static(static_def: &StaticDefinition) -> bool {
     static_def.mode == StaticMode::CantBlock
+        && static_def.affected == Some(TargetFilter::SelfRef)
         && matches!(
             &static_def.condition,
             Some(StaticCondition::HasCounters {
