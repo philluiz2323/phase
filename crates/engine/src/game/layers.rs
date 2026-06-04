@@ -1275,6 +1275,16 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
 
+        // CR 613.1f: "Effects that say an object can't have an ability" are
+        // applied in Layer 6 (Ability), together with the keyword grants/removals.
+        // Strip denied keywords at the END of Layer 6 — after all grants in this
+        // bucket but BEFORE Layer 7 — so a keyword-conditional P/T effect
+        // ("creatures with flying get +1/+1") evaluated later observes the denied
+        // state (Archetype cycle, Arcane Lighthouse).
+        if *layer == Layer::Ability {
+            apply_cant_have_keyword_denials(state);
+        }
+
         // CR 613.4c: P/T counters modify power/toughness in layer 7c. Counters
         // are object state, not continuous effects, so the `CounterPT` bucket is
         // empty and the fold runs here — after the 7c `+N/+N` effects above and
@@ -1356,11 +1366,6 @@ pub fn evaluate_layers(state: &mut GameState) {
     // characteristics are determined. These flags feed CR 510.1 combat damage
     // assignment and must observe final post-layer characteristics.
     apply_combat_assignment_rule_effects(state);
-
-    // CR 613.1f: After all keyword grants/removals, strip keywords that affected
-    // objects "can't have" (Archetype cycle, Arcane Lighthouse) so the denial is
-    // order-independent.
-    apply_cant_have_keyword_denials(state);
 
     // CR 302.6: Re-apply summoning sickness for any permanent whose effective
     // controller changed during this evaluation. The diff is taken against
@@ -5013,6 +5018,88 @@ mod tests {
                 .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
         );
+    }
+
+    /// CR 613.1f → CR 613.1g: The denial is applied at the END of Layer 6, so a
+    /// Layer 7 power/toughness effect conditional on the denied keyword
+    /// ("creatures with flying get +1/+1") observes the keyword as already removed
+    /// and does NOT apply. Regression guard for the layer-evaluation-order fix:
+    /// running the strip after the full layer loop (post-Layer-7) would let the
+    /// buff land incorrectly.
+    #[test]
+    fn cant_have_keyword_denial_is_observed_by_layer7_pt() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Layer 6: grant Flying to all creatures.
+        let flying_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        // Layer 7: creatures WITH flying get +1/+1 — keyword-conditional P/T.
+        let flying_pt_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight & Buff".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(flying_anthem);
+            obj.static_definitions.push(flying_pt_anthem);
+        }
+
+        // Layer 6 denial: creatures can't have or gain Flying.
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let b = state.objects.get(&bear).unwrap();
+        assert!(
+            !b.has_keyword(&Keyword::Flying),
+            "denial must strip Flying at the end of Layer 6"
+        );
+        assert_eq!(
+            b.power,
+            Some(2),
+            "Layer 7 'flying creatures get +1/+1' must NOT apply — the denial removed \
+             Flying before Layer 7, so the keyword-conditional buff sees no Flying"
+        );
+        assert_eq!(b.toughness, Some(2), "toughness likewise unbuffed");
     }
 
     /// CR 301.5 + CR 303.4 + CR 613.4c: End-to-end runtime confirmation of
