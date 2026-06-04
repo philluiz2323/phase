@@ -2366,6 +2366,41 @@ fn build_restriction_clause(
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
     let lower = predicate.to_lowercase();
 
+    // CR 702.18a / 702.11a: a duration-scoped "can't be the target [of ...]" grant
+    // on a subject/target (Vines of Vastwood: "target creature can't be the target
+    // of spells or abilities your opponents control this turn") is Shroud / Hexproof.
+    // Emit the keyword grant so the targeting check applies the correct controller
+    // scope (Hexproof leaves the controller able to target), reusing the enforced
+    // keyword path rather than a scope-less rule static.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(&lower) {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::keywords::Keyword::Shroud
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::keywords::Keyword::Hexproof
+            }
+        };
+        let static_def = StaticDefinition::continuous()
+            .affected(static_affected_for_application(&application))
+            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+            .description(predicate.to_string());
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: duration.clone(),
+                target: application.target,
+            },
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
     // CR 508.1d / CR 509.1a: Restriction predicates for attack/block/target.
     // Compound restrictions ("can't attack or block") produce multiple StaticDefinition entries.
     let modes = parse_restriction_modes(&lower)?;
