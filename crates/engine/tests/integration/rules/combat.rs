@@ -83,8 +83,11 @@ fn bushido_becomes_blocked_pumps_attacker_not_blocker() {
     );
     runner.resolve_top();
 
-    runner.assert_power_toughness(attacker_id, 4, 4);
-    runner.assert_power_toughness(blocker_id, 2, 2);
+    let state = runner.state();
+    assert_eq!(state.objects[&attacker_id].power, Some(4));
+    assert_eq!(state.objects[&attacker_id].toughness, Some(4));
+    assert_eq!(state.objects[&blocker_id].power, Some(2));
+    assert_eq!(state.objects[&blocker_id].toughness, Some(2));
 }
 
 #[test]
