@@ -629,7 +629,40 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     }
 
     // Fall back to the single-return parser.
-    parse_static_line(text).into_iter().collect()
+    let mut defs: Vec<StaticDefinition> = parse_static_line(text).into_iter().collect();
+    append_cant_have_keyword_denials(text, &mut defs);
+    defs
+}
+
+/// CR 613.1f / CR 702: "... can't have or gain [keyword]" (Theros Archetype cycle,
+/// Arcane Lighthouse) both strips the keyword now — a `RemoveKeyword` continuous
+/// modification on the base `Continuous` static — AND denies it going forward, so a
+/// concurrent anthem can't grant it back. The forward denial is a Layer 6
+/// `StaticMode::CantHaveKeyword` static (enforced by `apply_cant_have_keyword_denials`
+/// in `layers.rs`). Emit it as a sibling of the continuous static, reusing that
+/// static's `affected`/`condition` so it covers exactly the same objects.
+fn append_cant_have_keyword_denials(text: &str, defs: &mut Vec<StaticDefinition>) {
+    if !nom_primitives::scan_contains(&text.to_lowercase(), "can't have") {
+        return;
+    }
+    let mut siblings: Vec<StaticDefinition> = Vec::new();
+    for def in defs.iter() {
+        if !matches!(def.mode, StaticMode::Continuous) {
+            continue;
+        }
+        for modification in &def.modifications {
+            if let ContinuousModification::RemoveKeyword { keyword } = modification {
+                siblings.push(StaticDefinition {
+                    mode: StaticMode::CantHaveKeyword {
+                        keyword: keyword.clone(),
+                    },
+                    modifications: Vec::new(),
+                    ..def.clone()
+                });
+            }
+        }
+    }
+    defs.extend(siblings);
 }
 
 pub(crate) fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {

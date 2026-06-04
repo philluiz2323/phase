@@ -1357,6 +1357,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // assignment and must observe final post-layer characteristics.
     apply_combat_assignment_rule_effects(state);
 
+    // CR 613.1f: After all keyword grants/removals, strip keywords that affected
+    // objects "can't have" (Archetype cycle, Arcane Lighthouse) so the denial is
+    // order-independent.
+    apply_cant_have_keyword_denials(state);
+
     // CR 302.6: Re-apply summoning sickness for any permanent whose effective
     // controller changed during this evaluation. The diff is taken against
     // `prev_controllers` snapshotted at the top of the function. Layer 2
@@ -2468,6 +2473,51 @@ fn apply_combat_assignment_rule_effects_filtered(
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+/// CR 613.1f: Layer 6 applies "effects that say an object can't have an ability."
+/// `StaticMode::CantHaveKeyword { keyword }` (Theros Archetype cycle, Arcane
+/// Lighthouse: "... can't have or gain [keyword]") denies the keyword to its
+/// affected objects. This is run AFTER all keyword grants/removals are applied,
+/// so the denial wins regardless of grant timestamp — the rules-correct "can't
+/// have" outcome (a concurrent anthem can't restore a denied keyword).
+fn apply_cant_have_keyword_denials(state: &mut GameState) {
+    // Collect (affected object, denied keyword) pairs under an immutable borrow,
+    // then strip — avoids a borrow conflict with the per-object mutation.
+    let mut denials: Vec<(ObjectId, Keyword)> = Vec::new();
+    for (source, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
+        let StaticMode::CantHaveKeyword { keyword } = &def.mode else {
+            continue;
+        };
+        let ctx = FilterContext::from_source(state, source.id);
+        for id in super::targeting::zone_object_ids(state, crate::types::zones::Zone::Battlefield) {
+            // CR 604.1: a static with no `affected` filter is intrinsically SelfRef.
+            let affected = match def.affected.as_ref() {
+                None => id == source.id,
+                Some(filter) => matches_target_filter(state, id, filter, &ctx),
+            };
+            if !affected {
+                continue;
+            }
+            if let Some(condition) = def.condition.as_ref() {
+                if !evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    source.controller,
+                    source.id,
+                    id,
+                ) {
+                    continue;
+                }
+            }
+            denials.push((id, keyword.clone()));
+        }
+    }
+    for (id, keyword) in denials {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.keywords.retain(|k| k != &keyword);
         }
     }
 }
@@ -4886,6 +4936,74 @@ mod tests {
         assert!(
             equipped.has_keyword(&Keyword::Shroud),
             "equipped creature must gain Shroud from the keyword companion"
+        );
+    }
+
+    /// CR 613.1f + CR 702: End-to-end confirmation that the Theros Archetype cycle /
+    /// Arcane Lighthouse "can't have or gain [keyword]" denial wins in Layer 6 over a
+    /// concurrent keyword grant. A creature given Flying by an anthem must NOT keep
+    /// Flying once an Archetype-style `CantHaveKeyword { Flying }` static is in play —
+    /// the denial is applied after all grants, so it is order-independent.
+    #[test]
+    fn cant_have_keyword_denial_overrides_concurrent_grant() {
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Anthem: grants Flying to all creatures (Layer 6 ability-adding effect).
+        let anthem_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(anthem_static);
+        }
+
+        // Baseline: with only the anthem, the bear gains Flying.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects.get(&bear).unwrap().has_keyword(&Keyword::Flying),
+            "anthem must grant Flying before the denial is added"
+        );
+
+        // Archetype: creatures can't have or gain Flying (Layer 6 denial).
+        let denial_static = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial_static);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects.get(&bear).unwrap().has_keyword(&Keyword::Flying),
+            "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
         );
     }
 
