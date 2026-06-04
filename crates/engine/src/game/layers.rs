@@ -4976,7 +4976,11 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert!(
-            state.objects.get(&bear).unwrap().has_keyword(&Keyword::Flying),
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
             "anthem must grant Flying before the denial is added"
         );
 
@@ -5002,7 +5006,11 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert!(
-            !state.objects.get(&bear).unwrap().has_keyword(&Keyword::Flying),
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
         );
     }
