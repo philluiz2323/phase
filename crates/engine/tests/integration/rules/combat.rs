@@ -70,6 +70,8 @@ fn bushido_becomes_blocked_pumps_attacker_not_blocker() {
             attacks: vec![(attacker_id, AttackTarget::Player(P1))],
         })
         .expect("Bushido creature should be able to attack");
+    // CR 508.2: Active player gets priority after attackers before blockers.
+    runner.pass_both_players();
     runner
         .act(GameAction::DeclareBlockers {
             assignments: vec![(blocker_id, attacker_id)],
