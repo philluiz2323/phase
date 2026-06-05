@@ -566,6 +566,11 @@ fn has_aftermath_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Aftermath)
 }
 
+/// CR 702.133: Check if an object has the Jump-start keyword.
+fn has_jumpstart_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::JumpStart)
+}
+
 /// CR 702.146: Check if an object has the Disturb keyword.
 fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disturb)
@@ -2365,6 +2370,9 @@ fn casting_variant_candidates(
         if has_aftermath_keyword(state, object_id) {
             candidates.push(CastingVariant::Aftermath);
         }
+        if has_jumpstart_keyword(state, object_id) {
+            candidates.push(CastingVariant::JumpStart);
+        }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
         }
@@ -2809,6 +2817,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             )
         {
             CastingVariant::Aftermath
+        } else if has_jumpstart_keyword(state, object_id) && obj.zone == Zone::Graveyard {
+            CastingVariant::JumpStart
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
         } else if let Some(source) = graveyard_permission_src {
@@ -7794,6 +7804,13 @@ fn can_cast_prepared_now(
     // CR 702.81a: Retrace requires a discardable land card in hand.
     if prepared.casting_variant == CastingVariant::Retrace
         && !casting_costs::can_pay_retrace_additional_cost(state, player, prepared.object_id)
+    {
+        return false;
+    }
+
+    // CR 702.133a: Jump-start requires a discardable card (any card) in hand.
+    if prepared.casting_variant == CastingVariant::JumpStart
+        && !casting_costs::can_pay_jumpstart_additional_cost(state, player, prepared.object_id)
     {
         return false;
     }
@@ -27124,6 +27141,171 @@ mod tests {
             !state.exile.contains(&spell),
             "Retrace has no flashback-style exile replacement"
         );
+    }
+
+    fn add_jumpstart_sorcery_to_graveyard(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            card_id,
+            player,
+            "Radical Idea".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.base_keywords.push(Keyword::JumpStart);
+        obj.keywords = obj.base_keywords.clone();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "jump-start test spell".to_string(),
+                description: None,
+            },
+        );
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
+        obj_id
+    }
+
+    // CR 702.133a: jump-start discards *any* card (unlike Retrace's land), so a
+    // hand holding only a nonland card makes the graveyard cast available.
+    #[test]
+    fn jumpstart_graveyard_spell_surfaces_when_any_card_discard_and_mana_are_payable() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "jump-start card with any discardable card should be in the graveyard castable set"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell));
+    }
+
+    // CR 702.133a: with an empty hand there is no card to discard, so jump-start
+    // is not a legal cast.
+    #[test]
+    fn jumpstart_without_any_discardable_card_is_not_a_legal_cast_action() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "jump-start card with an empty hand should not be castable"
+        );
+        assert!(!can_cast_object_now(&state, PlayerId(0), spell));
+    }
+
+    // CR 702.133a: the discarded card may be a nonland — Retrace would reject it.
+    #[test]
+    fn jumpstart_cast_discards_any_card_then_pushes_spell_with_jumpstart_variant() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        let nonland = add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+            .expect("jump-start cast should request a discard");
+        let (cards, pending_cast) = match waiting {
+            WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: cards,
+                count: 1,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                (cards, pending_cast)
+            }
+            other => panic!("expected PayCost Discard, got {other:?}"),
+        };
+        assert!(
+            cards.contains(&nonland),
+            "jump-start must allow discarding a nonland card"
+        );
+
+        let mut events = Vec::new();
+        let resumed = super::casting_costs::handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            *pending_cast,
+            1,
+            &cards,
+            &[nonland],
+            &mut events,
+        )
+        .expect("discarding a nonland should finish jump-start cost payment");
+
+        assert!(matches!(resumed, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects.get(&nonland).unwrap().zone, Zone::Graveyard);
+        assert_eq!(state.objects.get(&spell).unwrap().zone, Zone::Stack);
+        assert!(matches!(
+            state.stack[0].kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::JumpStart,
+                ..
+            }
+        ));
+    }
+
+    // CR 702.133a: "exile this card … any time it would leave the stack" — unlike
+    // Retrace, a jump-started spell is exiled on resolution, not put in the graveyard.
+    #[test]
+    fn jumpstart_spell_resolves_to_exile_not_graveyard() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        let nonland = add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+            .expect("jump-start cast should start");
+        let (cards, pending_cast) = match waiting {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices: cards,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
+            } => (cards, pending_cast),
+            other => panic!("expected PayCost Discard, got {other:?}"),
+        };
+        super::casting_costs::handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            *pending_cast,
+            1,
+            &cards,
+            &[nonland],
+            &mut Vec::new(),
+        )
+        .expect("discarding a card should put the jump-start spell on the stack");
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&spell).unwrap().zone,
+            Zone::Exile,
+            "CR 702.133a: a jump-started spell is exiled when it leaves the stack"
+        );
+        assert!(state.exile.contains(&spell));
     }
 
     fn add_echo_of_eons_to_graveyard(state: &mut GameState) -> ObjectId {
