@@ -442,6 +442,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                     || has_aftermath_keyword(state, obj_id)
                     || has_disturb_keyword(state, obj_id)
                     || retrace_has_discardable_land(state, player, obj_id)
+                    || jumpstart_has_discardable_card(state, player, obj_id)
                     || graveyard_has_enough_for_escape(state, player, obj_id))
         })
     }));
@@ -571,6 +572,17 @@ fn has_jumpstart_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::JumpStart)
 }
 
+/// CR 702.133a: Jump-start requires discarding a card (any card) as an
+/// additional cost, so it is only castable with at least one card in hand.
+fn jumpstart_has_discardable_card(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    has_jumpstart_keyword(state, object_id)
+        && casting_costs::can_pay_jumpstart_additional_cost(state, player, object_id)
+}
+
 /// CR 702.146: Check if an object has the Disturb keyword.
 fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disturb)
@@ -676,6 +688,7 @@ fn has_effective_graveyard_cast_keyword(
 ) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
+        || has_jumpstart_keyword(state, object_id)
         || obj
             .keywords
             .iter()
