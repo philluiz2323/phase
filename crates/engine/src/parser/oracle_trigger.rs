@@ -41,6 +41,8 @@ use crate::types::ability::{
     TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
     ZoneChangeClause,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -721,8 +723,22 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // "if X, " can hide the "you may " optional marker behind the if-clause.
     let (effect_without_if, if_condition) = extract_if_condition(&effect_text);
 
-    // CR 609.3: "You may" at the start of the effect text makes the triggered
-    // effect optional at resolution.
+    // CR 608.2c (resolution-order instructions): "You may" at the start of
+    // the effect text makes the triggered effect optional at resolution.
+    //
+    // IMPORTANT — multi-sentence triggers must NOT hoist this flag to the
+    // outer trigger. A pattern like
+    //   "look at the top card of your library. If <cond>, you may reveal
+    //    that card and put it into your hand."
+    // contains a MANDATORY first action (`look at …`) followed by an
+    // OPTIONAL second action gated on a condition. Hoisting `you may` to the
+    // trigger-level `optional` flag would make the entire trigger
+    // (including the mandatory look) skippable, which is wrong per
+    // CR 608.2c (the controller follows instructions in printed order).
+    // Per-chunk peel in `clause_shell::peel_clause` marks only the inner
+    // optional sub_ability `optional = true`, which is the correct shape.
+    // The detection below only fires when the `you may` is the FIRST token
+    // (modulo an intervening-if), which excludes the multi-sentence case.
     let starts_with_you_may = |s: &str| tag::<_, _, OracleError<'_>>("you may ").parse(s).is_ok();
     let after_structural_if = effect_lower
         .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
@@ -2235,6 +2251,10 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(substitute_another_in_expr(inner)),
             offset: *offset,
+        },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(substitute_another_in_expr(inner)),
+            minimum: *minimum,
         },
         QuantityExpr::DivideRounded {
             inner,
@@ -5109,7 +5129,15 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         ))
         .parse(after_quantifier)
         {
-            return (filter, rest.trim_start());
+            // CR 603.2c: "one or more opponents/players each <verb>" — the
+            // distributive "each" belongs to the subject phrase.  Strip it here
+            // at the subject seam so every event-verb parser (draws, loses life,
+            // etc.) sees a bare verb without a stray "each " prefix.
+            let trimmed = rest.trim_start();
+            let (trimmed, _) = opt(tag::<_, _, OracleError<'_>>("each "))
+                .parse(trimmed)
+                .unwrap_or((trimmed, None));
+            return (filter, trimmed);
         }
 
         let (filter, rest) = parse_type_phrase(after_quantifier);
@@ -5727,7 +5755,10 @@ fn try_parse_event(
                 def.valid_card = Some(subject.clone());
                 // CR 508.1a: Battalion/Pack Tactics counts any N *other* creatures
                 // (untyped head noun) → no condition-level type axis.
-                def.condition = Some(TriggerCondition::MinCoAttackers { minimum: n });
+                def.condition = Some(TriggerCondition::MinCoAttackers {
+                    minimum: n,
+                    filter: None,
+                });
                 return Some((TriggerMode::Attacks, def));
             }
         }
@@ -6373,21 +6404,42 @@ fn try_parse_event(
     // Vito, Thorn of the Dusk Rose ("Whenever you gain life, each opponent loses..."),
     // Bloodchief Ascension-adjacent cards, and Moonstone Harbinger-style combined
     // life-change triggers.
-    fn parse_life_verb(input: &str) -> OracleResult<'_, TriggerMode> {
-        alt((
-            value(TriggerMode::LifeChanged, tag("gains or loses life")),
+    fn parse_life_verb(input: &str) -> OracleResult<'_, (TriggerMode, Option<(Comparator, u32)>)> {
+        // Combined "gain or lose" form carries no amount qualifier.
+        if let Ok((rest, mode)) = alt((
+            value(
+                TriggerMode::LifeChanged,
+                tag::<_, _, OracleError<'_>>("gains or loses life"),
+            ),
             value(TriggerMode::LifeChanged, tag("gain or lose life")),
-            value(TriggerMode::LifeLost, tag("loses life")),
-            value(TriggerMode::LifeLost, tag("lose life")),
-            value(TriggerMode::LifeGained, tag("gains life")),
-            value(TriggerMode::LifeGained, tag("gain life")),
         ))
         .parse(input)
+        {
+            return Ok((rest, (mode, None)));
+        }
+
+        // CR 119.3: singular life verb + optional magnitude qualifier + "life"
+        // ("loses exactly 1 life", "lose 3 or more life"). "loses"/"gains" must
+        // precede "lose"/"gain" so the longer conjugation wins.
+        let (rest, mode) = alt((
+            value(
+                TriggerMode::LifeLost,
+                alt((tag::<_, _, OracleError<'_>>("loses"), tag("lose"))),
+            ),
+            value(TriggerMode::LifeGained, alt((tag("gains"), tag("gain")))),
+        ))
+        .parse(input)?;
+        let (rest, _) = tag(" ").parse(rest)?;
+        let (rest, amount) = opt(parse_event_amount_quantifier).parse(rest)?;
+        let (rest, _) = tag("life").parse(rest)?;
+        Ok((rest, (mode, amount)))
     }
-    if let Ok((tail, mode)) = parse_life_verb.parse(rest) {
+    if let Ok((tail, (mode, amount))) = parse_life_verb.parse(rest) {
         let mut def = make_base();
         def.mode = mode.clone();
         def.valid_target = Some(subject.clone());
+        // CR 119.3: per-event magnitude constraint ("loses exactly N life").
+        def.life_amount = amount;
         // CR 603.4 + CR 102.1: "gains life during their turn" / "loses life
         // during their turn" — the trailing timing tail restricts the trigger
         // to the acting player's own turn. Composed with the shared typed
@@ -6803,19 +6855,20 @@ fn parse_damage_predicate_tail(
     input: &str,
 ) -> OracleResult<'_, (DamageKindFilter, Option<(Comparator, u32)>)> {
     let (rest, kind) = opt(parse_damage_kind_adjective).parse(input)?;
-    let (rest, amount) = opt(parse_damage_amount_quantifier).parse(rest)?;
+    let (rest, amount) = opt(parse_event_amount_quantifier).parse(rest)?;
     let (rest, _) = tag("damage").parse(rest)?;
     Ok((rest, (kind.unwrap_or(DamageKindFilter::Any), amount)))
 }
 
-/// CR 603.2 + CR 120.1: Parse a damage-amount quantifier
-/// ("`5 or more `" / "`exactly 5 `") and return the resulting
-/// `(Comparator, threshold)` pair to store on `TriggerDefinition::damage_amount`.
-/// The trailing space is consumed so the caller can chain directly into
-/// `tag("damage")`.
+/// CR 603.2: Parse an event-magnitude quantifier ("`5 or more `" / "`exactly 5 `")
+/// that precedes a head noun, returning the resulting `(Comparator, threshold)`
+/// pair. The trailing space is consumed so the caller can chain directly into
+/// the head noun (`tag("damage")` for CR 120.1 damage triggers,
+/// `tag("life")` for CR 119.3 life triggers). Event-agnostic by design — the
+/// caller decides which constraint field the pair lands on.
 ///
 /// `"less than N"` slots in here via the same axis when needed.
-fn parse_damage_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, u32)> {
+fn parse_event_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, u32)> {
     fn parse_or_more(input: &str) -> OracleResult<'_, (Comparator, u32)> {
         let (rest, n) = nom_primitives::parse_number(input)?;
         let (rest, _) = tag(" or more ").parse(rest)?;
@@ -10858,7 +10911,7 @@ mod tests {
     use crate::types::statics::CastFrequency;
 
     fn blocking_source_beyond_first_expr() -> QuantityExpr {
-        QuantityExpr::Offset {
+        let count_minus_one = QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
                     filter: TargetFilter::Typed(TypedFilter {
@@ -10869,6 +10922,10 @@ mod tests {
                 },
             }),
             offset: -1,
+        };
+        QuantityExpr::ClampMin {
+            inner: Box::new(count_minus_one),
+            minimum: 0,
         }
     }
 
@@ -12189,8 +12246,9 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert!(def.condition.is_some());
-        if let Some(TriggerCondition::MinCoAttackers { minimum }) = &def.condition {
+        if let Some(TriggerCondition::MinCoAttackers { minimum, filter }) = &def.condition {
             assert_eq!(*minimum, 2);
+            assert_eq!(*filter, None);
         } else {
             panic!("Expected MinCoAttackers");
         }
@@ -13716,7 +13774,7 @@ mod tests {
 
         // Clause 2 — effect + player scope: LoseTheGame fanned out over each
         // player the source creature attacked this turn (CR 508.6). The
-        // controller is excluded by `OpponentAttackedBySourceThisTurn`, so the
+        // controller is excluded by `OpponentAttacked { Source, ThisTurn }`, so the
         // Angel never eliminates itself — directly fixing the "my own Angel
         // killed me" report.
         let execute = def.execute.as_ref().expect("execute must be Some");
@@ -13727,7 +13785,10 @@ mod tests {
         );
         assert_eq!(
             execute.player_scope,
-            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            }),
             "LoseTheGame must scope to players the source attacked this turn (issue #1599), got {:?}",
             execute.player_scope,
         );
@@ -16108,6 +16169,80 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_one_or_more_opponents_each_lose_exactly_one_life() {
+        // CR 119.3 + CR 603.2c: Ob Nixilis, Captive Kingpin — batched
+        // "one or more opponents each" subject plus an "exactly 1" magnitude
+        // constraint on the life-loss event.
+        let def = parse_trigger_line(
+            "Whenever one or more opponents each lose exactly 1 life, put a +1/+1 counter on this creature.",
+            "Ob Nixilis, Captive Kingpin",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert!(
+            def.batched,
+            "CR 603.2c: 'one or more … each' is a batched trigger"
+        );
+        assert_eq!(
+            def.life_amount,
+            Some((Comparator::EQ, 1)),
+            "the 'exactly 1' qualifier must constrain the life-loss magnitude"
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_one_or_more_opponents_each_draw_generalizes() {
+        // CR 603.2c: Prove the "each" seam-move generalizes to non-life verbs.
+        // The distributive "each" is stripped at the subject seam (parse_single_subject),
+        // so parse_draws_card sees "draw a card" directly without any "each " prefix.
+        let def = parse_trigger_line(
+            "Whenever one or more opponents each draw a card, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert!(
+            def.batched,
+            "CR 603.2c: 'one or more … each' is a batched trigger"
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_life_loss_or_more_threshold() {
+        // CR 119.3: the magnitude qualifier composes with "N or more" too — the
+        // same building block that powers "exactly N", proving the class is
+        // generalized rather than special-cased to one card.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses 3 or more life, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(def.life_amount, Some((Comparator::GE, 3)));
+    }
+
+    #[test]
+    fn trigger_plain_life_loss_has_no_amount_constraint() {
+        // Regression: an unqualified life-loss trigger must leave `life_amount`
+        // None so every loss fires it.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses life, you gain that much life.",
+            "Exquisite Blood",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(def.life_amount, None);
     }
 
     #[test]
@@ -19097,6 +19232,45 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::BeginCombat));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    /// Issue #1993: Halana and Alena, Partners — X in the counter clause must bind
+    /// to source power, not an unresolved Variable name.
+    #[test]
+    fn halana_alena_partners_combat_trigger_puts_source_power_counters() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, put X +1/+1 counters on another target creature you control, where X is Halana and Alena's power. That creature gains haste until end of turn.",
+            "Halana and Alena, Partners",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        let execute = def.execute.as_ref().expect("execute");
+        match execute.effect.as_ref() {
+            Effect::PutCounter {
+                count,
+                counter_type,
+                target,
+            } => {
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                    "where X is printed name's power must bind to Source, got {count:?}"
+                );
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "expected typed creature target, got {target:?}"
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
     }
 
     #[test]
