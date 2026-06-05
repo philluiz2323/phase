@@ -2016,6 +2016,113 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     );
 }
 
+/// CR 702.78a: Conspire — "As an additional cost to cast this spell, you may tap
+/// two untapped creatures you control that each share a color with it" and "When
+/// you cast this spell, if its conspire cost was paid, copy it. If the spell has
+/// any targets, you may choose new targets for the copy." Mirrors
+/// `synthesize_replicate`: an optional additional cast cost plus a copy-on-cast
+/// trigger gated on that cost having been paid.
+pub fn synthesize_conspire(face: &mut CardFace) {
+    let count = face
+        .keywords
+        .iter()
+        .filter(|k| matches!(k, Keyword::Conspire))
+        .count();
+    if count == 0 {
+        return;
+    }
+
+    // CR 702.78b: multiple Conspire instances are paid and trigger separately. The
+    // engine tracks a single aggregate additional-cost-paid flag, so defer the
+    // multi-instance case rather than miscount copies (mirrors Replicate's
+    // CR 702.56b multi-instance deferral).
+    if count > 1 {
+        defer_synthesis(
+            face,
+            "conspire_multiple_instances",
+            "CR 702.78b: multiple Conspire instances require per-instance payment tracking"
+                .to_string(),
+        );
+        return;
+    }
+
+    // CR 702.78a + CR 601.2b: the optional additional cost — tap two untapped
+    // creatures you control that each share a color with the spell.
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::TapCreatures {
+                count: 2,
+                filter: conspire_tap_filter(),
+            },
+            repeatable: false,
+        });
+    }
+
+    // CR 702.78a: "When you cast this spell, if its conspire cost was paid, copy
+    // it." Idempotent against re-synthesis.
+    if !face.triggers.iter().any(is_conspire_copy_trigger) {
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SelfRef)
+                .trigger_zones(vec![Zone::Stack])
+                .execute(conspire_copy_ability_definition())
+                .description(
+                    "CR 702.78a: Conspire — when you cast this spell, if its conspire cost was \
+                     paid, copy it; you may choose new targets for the copy."
+                        .to_string(),
+                ),
+        );
+    }
+}
+
+/// CR 702.78a: "creature you control that shares a color with it [the spell]".
+/// `SharesQuality`'s `reference` resolves `SelfRef` to the cost's source — the
+/// cast spell — so each candidate must share a color with the spell being cast
+/// (the color-comparison the engine already performs for Intimidate).
+fn conspire_tap_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::SharesQuality {
+                quality: crate::types::ability::SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::SelfRef)),
+                relation: crate::types::ability::SharedQualityRelation::Shares,
+            }]),
+    )
+}
+
+/// CR 702.78a: "copy it" — once, with optional new targets, gated on the conspire
+/// cost having been paid. No `repeat_for`: Conspire copies exactly once, unlike
+/// Replicate (which copies per payment).
+fn conspire_copy_ability_definition() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+        },
+    )
+    .condition(AbilityCondition::additional_cost_paid_any())
+}
+
+/// Idempotency-shape predicate for the Conspire copy-on-cast trigger. Distinct
+/// from Replicate/Gravestorm copy triggers by the absence of `repeat_for`
+/// (Conspire copies once, not per-count).
+fn is_conspire_copy_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.trigger_zones.contains(&Zone::Stack)
+        && t.execute.as_deref().is_some_and(|a| {
+            matches!(
+                &*a.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) && a.repeat_for.is_none()
+        })
+}
+
 /// CR 702.69a: The `AbilityDefinition` produced by a Gravestorm trigger — a
 /// self-referential `CopySpell` repeated once for each permanent put into a
 /// graveyard from the battlefield this turn. Mirrors
@@ -7364,6 +7471,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.56a: Replicate — repeatable optional additional cost + SpellCast
     // copy trigger that makes one copy per replicate payment.
     synthesize_replicate(face);
+    // CR 702.78a: Conspire — optional "tap two color-sharing creatures" additional
+    // cost + a copy-once-on-cast trigger gated on that cost being paid.
+    synthesize_conspire(face);
     // CR 702.69a: Gravestorm — copy this spell for each permanent put into a
     // graveyard from the battlefield this turn.
     synthesize_gravestorm(face);
@@ -16067,6 +16177,91 @@ mod replicate_synthesis_tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod conspire_synthesis_tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_conspire_sets_tap_creatures_cost_and_copy_trigger() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Conspire],
+            ..CardFace::default()
+        };
+        synthesize_conspire(&mut face);
+
+        // CR 702.78a: optional "tap two color-sharing creatures" additional cost.
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional {
+                cost: AbilityCost::TapCreatures { count, filter },
+                repeatable: false,
+            } => {
+                assert_eq!(*count, 2);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::SharesQuality {
+                            quality: crate::types::ability::SharedQuality::Color,
+                            reference: Some(r),
+                            ..
+                        } if matches!(**r, TargetFilter::SelfRef)
+                    )),
+                    "filter must share a color with the cast spell (SelfRef), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected non-repeatable TapCreatures cost, got {other:?}"),
+        }
+
+        // CR 702.78a: copy-once-on-cast trigger.
+        assert!(
+            face.triggers.iter().any(is_conspire_copy_trigger),
+            "conspire should add a copy-on-cast trigger, got {:?}",
+            face.triggers
+        );
+    }
+
+    #[test]
+    fn synthesize_conspire_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Conspire],
+            ..CardFace::default()
+        };
+        synthesize_conspire(&mut face);
+        synthesize_conspire(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_conspire_copy_trigger(t))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_conspire_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_conspire(&mut face);
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.iter().all(|t| !is_conspire_copy_trigger(t)));
+    }
+
+    #[test]
+    fn synthesize_conspire_defers_multiple_instances() {
+        // CR 702.78b: multiple instances need per-instance payment tracking, so the
+        // current single-aggregate model defers rather than miscounting copies.
+        let mut face = CardFace {
+            keywords: vec![Keyword::Conspire, Keyword::Conspire],
+            ..CardFace::default()
+        };
+        synthesize_conspire(&mut face);
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.iter().all(|t| !is_conspire_copy_trigger(t)));
     }
 }
 
