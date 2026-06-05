@@ -699,10 +699,11 @@ pub fn handle_foretell(
 }
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
-// CR 702.138 (Escape) / CR 702.146 (Disturb) / CR 702.180 (Harmonize): graveyard-cast alternative
-// permissions. Sneak (CR 702.190a) is a HAND-cast alt-cost and is deliberately
-// NOT listed here — including it would misclassify graveyard objects with a
-// granted Sneak as castable from the graveyard, which the rules do not permit.
+// CR 702.133 (Jump-start) / CR 702.138 (Escape) / CR 702.146 (Disturb) /
+// CR 702.180 (Harmonize): graveyard-cast alternative permissions. Sneak
+// (CR 702.190a) is a HAND-cast alt-cost and is deliberately NOT listed here —
+// including it would misclassify graveyard objects with a granted Sneak as
+// castable from the graveyard, which the rules do not permit.
 fn has_effective_graveyard_cast_keyword(
     state: &GameState,
     object_id: ObjectId,
@@ -710,7 +711,7 @@ fn has_effective_graveyard_cast_keyword(
 ) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
-        || has_jumpstart_keyword(state, object_id)
+        || jumpstart_castable_from_graveyard(state, object_id)
         || obj
             .keywords
             .iter()
@@ -27576,6 +27577,42 @@ mod tests {
             "jump-start card with an empty hand should not be castable"
         );
         assert!(!can_cast_object_now(&state, PlayerId(0), spell));
+    }
+
+    // CR 702.133a: jump-start grants a graveyard-cast permission only if the
+    // resulting spell is an instant or sorcery spell.
+    #[test]
+    fn jumpstart_on_non_instant_sorcery_does_not_enable_normal_graveyard_cast() {
+        let mut state = setup_game_at_main_phase();
+        let card_id = CardId(state.next_object_id);
+        let creature = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Experimental Jump-start Creature".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.base_keywords.push(Keyword::JumpStart);
+        obj.keywords = obj.base_keywords.clone();
+        add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&creature),
+            "Jump-start must not surface non-instant/sorcery graveyard cards"
+        );
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), creature),
+            "the shared graveyard-cast gate must not fall through to a normal cast"
+        );
     }
 
     // CR 702.133a: the discarded card may be a nonland — Retrace would reject it.
