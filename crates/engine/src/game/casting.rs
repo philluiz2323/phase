@@ -572,14 +572,33 @@ fn has_jumpstart_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::JumpStart)
 }
 
-/// CR 702.133a: Jump-start requires discarding a card (any card) as an
-/// additional cost, so it is only castable with at least one card in hand.
+/// CR 702.133a: Jump-start's graveyard-cast permission applies only "if the
+/// resulting spell is an instant or sorcery spell." The keyword is printed only
+/// on instants/sorceries, but an exotic keyword-grant could place it on another
+/// card type, so the type is checked explicitly rather than assumed implicit.
+fn jumpstart_castable_from_graveyard(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Graveyard
+            && has_jumpstart_keyword(state, object_id)
+            && obj.card_types.core_types.iter().any(|ct| {
+                matches!(
+                    ct,
+                    crate::types::card_type::CoreType::Instant
+                        | crate::types::card_type::CoreType::Sorcery
+                )
+            })
+    })
+}
+
+/// CR 702.133a: Jump-start requires discarding a card (any card — `filter: None`,
+/// unlike Retrace's land filter) as an additional cost, so it is only castable
+/// with at least one card in hand and an instant/sorcery in the graveyard.
 fn jumpstart_has_discardable_card(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
-    has_jumpstart_keyword(state, object_id)
+    jumpstart_castable_from_graveyard(state, object_id)
         && casting_costs::can_pay_jumpstart_additional_cost(state, player, object_id)
 }
 
@@ -2383,7 +2402,7 @@ fn casting_variant_candidates(
         if has_aftermath_keyword(state, object_id) {
             candidates.push(CastingVariant::Aftermath);
         }
-        if has_jumpstart_keyword(state, object_id) {
+        if jumpstart_castable_from_graveyard(state, object_id) {
             candidates.push(CastingVariant::JumpStart);
         }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
@@ -2830,7 +2849,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             )
         {
             CastingVariant::Aftermath
-        } else if has_jumpstart_keyword(state, object_id) && obj.zone == Zone::Graveyard {
+        } else if jumpstart_castable_from_graveyard(state, object_id) {
             CastingVariant::JumpStart
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
