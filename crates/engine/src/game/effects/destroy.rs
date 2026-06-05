@@ -754,7 +754,7 @@ mod tests {
             candidate_descriptions.as_slice(),
             &[
                 "Remove a shield counter".to_string(),
-                "Umbra armor: destroy the Aura instead".to_string(),
+                "Umbra armor: destroy Hyena Umbra instead".to_string(),
             ]
         );
         assert_eq!(

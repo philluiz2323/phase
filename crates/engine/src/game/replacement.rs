@@ -34,9 +34,9 @@ const SHIELD_COUNTER_DAMAGE_INDEX: usize = usize::MAX - 1;
 /// candidate id so the CR 616 replacement-ordering pipeline owns its application.
 const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
 
-fn umbra_armor_replacement_id(host_id: ObjectId) -> ReplacementId {
+fn umbra_armor_replacement_id(aura_id: ObjectId) -> ReplacementId {
     ReplacementId {
-        source: host_id,
+        source: aura_id,
         index: UMBRA_ARMOR_DESTROY_INDEX,
     }
 }
@@ -87,21 +87,29 @@ fn object_has_shield_counter(state: &GameState, object_id: ObjectId) -> bool {
         .is_some_and(|count| *count > 0)
 }
 
-/// CR 702.89a: Returns the id of a functioning Umbra (an Aura with umbra/totem
-/// armor) attached to `object_id`, if any. The Aura's umbra-armor static replaces
-/// a destruction of the permanent it enchants, so the eligibility query is keyed
-/// on the *host*, scanning its attachments. The first such Aura is returned;
-/// multiple Umbras each replace a separate destruction event.
-fn object_protected_by_umbra(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
-    let host = state.objects.get(&object_id)?;
-    host.attachments.iter().copied().find(|att_id| {
-        state.objects.get(att_id).is_some_and(|aura| {
-            aura.zone == Zone::Battlefield
-                && aura.is_phased_in()
-                && aura.card_types.subtypes.iter().any(|s| s == "Aura")
-                && aura.has_keyword(&crate::types::keywords::Keyword::TotemArmor)
-        })
+fn is_functioning_umbra_armor_aura(state: &GameState, aura_id: ObjectId) -> bool {
+    state.objects.get(&aura_id).is_some_and(|aura| {
+        aura.zone == Zone::Battlefield
+            && aura.is_phased_in()
+            && aura.card_types.subtypes.iter().any(|s| s == "Aura")
+            && aura.has_keyword(&crate::types::keywords::Keyword::TotemArmor)
     })
+}
+
+/// CR 702.89a: Iterate functioning Umbras (Auras with umbra/totem armor)
+/// attached to `object_id`. Each Aura's umbra-armor static replaces destruction
+/// of the permanent it enchants, so every attached Umbra is a separate CR 616
+/// candidate and the affected permanent's controller chooses which one applies.
+fn umbra_armor_attachments(
+    state: &GameState,
+    object_id: ObjectId,
+) -> impl Iterator<Item = ObjectId> + '_ {
+    state
+        .objects
+        .get(&object_id)
+        .into_iter()
+        .flat_map(|host| host.attachments.iter().copied())
+        .filter(|aura_id| is_functioning_umbra_armor_aura(state, *aura_id))
 }
 
 /// CR 122.1c: Remove one shield counter from the permanent, emitting
@@ -342,7 +350,11 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 
 fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
     if is_umbra_armor_replacement(rid) {
-        return "Umbra armor: destroy the Aura instead".to_string();
+        return state
+            .objects
+            .get(&rid.source)
+            .map(|aura| format!("Umbra armor: destroy {} instead", aura.name))
+            .unwrap_or_else(|| "Umbra armor: destroy the Aura instead".to_string());
     }
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
@@ -1140,12 +1152,13 @@ fn apply_umbra_armor_replacement(
     else {
         return Ok(event);
     };
-    // The virtual replacement is keyed on the enchanted host; ignore unrelated
-    // destroy events, and re-confirm the Umbra is still present at apply time.
-    let umbra_id = match object_protected_by_umbra(state, object_id) {
-        Some(id) if object_id == rid.source => id,
-        _ => return Ok(event),
-    };
+    // The virtual replacement is keyed on the Aura so multiple Umbras on the
+    // same host remain distinct CR 616 choices. Re-confirm the chosen Aura is
+    // still attached to this host at apply time.
+    let umbra_id = rid.source;
+    if !umbra_armor_attachments(state, object_id).any(|id| id == umbra_id) {
+        return Ok(event);
+    }
 
     // CR 702.89a: remove all damage marked on the enchanted permanent. (No tap and
     // no combat removal — that is regeneration, CR 701.19b/c, not umbra armor.)
@@ -3107,8 +3120,8 @@ pub fn find_applicable_replacements(
     // the shield-counter match above so a permanent carrying both a shield counter
     // and an Umbra exposes both candidates for CR 616 ordering.
     if let ProposedEvent::Destroy { object_id, .. } = event {
-        if object_protected_by_umbra(state, *object_id).is_some() {
-            let rid = umbra_armor_replacement_id(*object_id);
+        for umbra_id in umbra_armor_attachments(state, *object_id) {
+            let rid = umbra_armor_replacement_id(umbra_id);
             if !event.already_applied(&rid) {
                 candidates.push(rid);
             }
@@ -7870,6 +7883,72 @@ mod tests {
         assert_eq!(result, ReplacementResult::Prevented);
         assert!(state.battlefield.contains(&creature));
         assert!(!state.battlefield.contains(&umbra));
+    }
+
+    #[test]
+    fn multiple_umbra_armor_auras_prompt_for_aura_choice() {
+        // CR 616.1 + CR 702.89a: each Umbra on the enchanted permanent creates
+        // its own replacement effect. The controller chooses which Aura is
+        // destroyed; the engine must not deterministically pick the first.
+        let mut state = GameState::new_two_player(42);
+        let (creature, hyena_umbra) = create_creature_with_umbra(&mut state, PlayerId(0));
+        let bear_umbra = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear Umbra".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&bear_umbra).unwrap();
+            aura.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(crate::types::keywords::Keyword::TotemArmor);
+            aura.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(bear_umbra);
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: creature,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for two Umbra armor replacements, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+
+        let WaitingFor::ReplacementChoice {
+            candidate_count,
+            candidate_descriptions,
+            ..
+        } = replacement_choice_waiting_for(player, &state)
+        else {
+            panic!("expected ReplacementChoice waiting_for");
+        };
+        assert_eq!(candidate_count, 2);
+        let labels: HashSet<&str> = candidate_descriptions.iter().map(String::as_str).collect();
+        assert_eq!(
+            labels,
+            HashSet::from([
+                "Umbra armor: destroy Hyena Umbra instead",
+                "Umbra armor: destroy Bear Umbra instead",
+            ])
+        );
+        assert!(state.battlefield.contains(&hyena_umbra));
+        assert!(state.battlefield.contains(&bear_umbra));
     }
 
     #[test]
