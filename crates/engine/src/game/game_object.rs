@@ -806,6 +806,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub mana_spent_to_cast_amount: u32,
 
+    /// CR 702.150a: Number of this object's Phyrexian mana symbols that the
+    /// caster chose to pay with **life** (2 life each). Set at cast finalization
+    /// from the `ShardChoice::PayLife` selections; read when the object enters as
+    /// a planeswalker with `Keyword::Compleated` to reduce its entering loyalty by
+    /// two per symbol. Like `mana_spent_to_cast_amount`, this is a historical cast
+    /// fact that persists through resolution; initialized to 0 by `GameObject::new`.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub phyrexian_life_paid: u32,
+
     /// CR 106.3 + CR 601.2h: Source snapshots for each mana spent to cast this
     /// object. One entry per spent mana lets source-qualified dynamic quantities
     /// count "mana from a Cave/Treasure/artifact source" without depending on
@@ -1048,6 +1057,7 @@ impl GameObject {
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
             mana_spent_to_cast_amount: 0,
+            phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
         }
