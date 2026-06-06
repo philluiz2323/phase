@@ -584,32 +584,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         enter_with_counters.extend(intrinsic);
                     }
                 }
-
-                // CR 702.150a: Compleated — "If this permanent would enter with
-                // one or more loyalty counters on it and the player who cast it
-                // chose to pay life for any part of its cost represented by
-                // Phyrexian mana symbols, it instead enters with that many
-                // loyalty counters minus two for each of those mana symbols."
-                // Applied to the seeded loyalty BEFORE the replacement pipeline so
-                // Doubling-Season-class replacements (CR 614.1a) operate on the
-                // reduced amount. `phyrexian_life_paid` was recorded at cast
-                // finalization from the `ShardChoice::PayLife` selections.
-                if obj.phyrexian_life_paid > 0
-                    && obj.has_keyword(&crate::types::keywords::Keyword::Compleated)
-                {
-                    let reduction = obj.phyrexian_life_paid.saturating_mul(2);
-                    if let crate::types::proposed_event::ProposedEvent::ZoneChange {
-                        enter_with_counters,
-                        ..
-                    } = &mut proposed
-                    {
-                        for (counter_type, count) in enter_with_counters.iter_mut() {
-                            if *counter_type == CounterType::Loyalty && *count >= 1 {
-                                *count = count.saturating_sub(reduction);
-                            }
-                        }
-                    }
-                }
             }
 
             // CR 702.176a: Impending — seed the N time counters into the ZoneChange

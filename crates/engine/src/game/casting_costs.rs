@@ -3873,9 +3873,9 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
     // being paid with life. A compleated planeswalker entering from this spell
-    // reads this at ETB to reduce its loyalty by two per such symbol (see
-    // `stack.rs`). Harmless for non-compleated spells (the field is only read for
-    // `Keyword::Compleated` planeswalkers).
+    // exposes this as an intrinsic AddCounter replacement so it can order with
+    // Doubling Season-class modifiers (CR 616.1). Harmless for non-compleated
+    // spells (the field is only read for `Keyword::Compleated` planeswalkers).
     {
         let phyrexian_life_paid = phyrexian_choices
             .map(|choices| {

@@ -956,6 +956,18 @@ pub(super) fn apply_etb_counters(
             events,
         );
     }
+    let replacement_choice_for_object = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.proposed.affected_object_id())
+        == Some(object_id);
+    if !replacement_choice_for_object {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            if obj.has_keyword(&Keyword::Compleated) {
+                obj.phyrexian_life_paid = 0;
+            }
+        }
+    }
 }
 
 fn find_copy_targets(

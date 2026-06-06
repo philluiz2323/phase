@@ -1166,6 +1166,10 @@ impl GameObject {
         // CR 701.60a / CR 702.112b: Suspect and renowned are battlefield designations.
         self.is_suspected = false;
         self.is_renowned = false;
+        // CR 400.7 + CR 702.150a: Compleated's life-payment count belongs to
+        // the cast that created this permanent. Once it leaves the battlefield,
+        // a later entry has no memory of that payment.
+        self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
         // CR 702.xxx: Prepared (Strixhaven) is a battlefield-only designation —

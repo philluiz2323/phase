@@ -224,6 +224,15 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
             state.layers_dirty.mark_full();
         }
 
+        // CR 400.7 + CR 702.150a: Compleated's Phyrexian life-payment count is
+        // cast metadata. Preserve it only while a resolving permanent spell is
+        // becoming the battlefield object whose ETB counter replacement will
+        // consume it; every other zone change creates an object with no memory
+        // of that payment.
+        if !(from == Zone::Stack && to == Zone::Battlefield) {
+            obj_mut.phyrexian_life_paid = 0;
+        }
+
         // CR 122.2: Counters cease to exist when an object changes zones.
         obj_mut.counters.clear();
     }
