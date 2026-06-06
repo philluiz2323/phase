@@ -5080,15 +5080,16 @@ pub struct GameState {
     /// to gate the Freerunning cast permission on the spell's controller.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub assassin_or_commander_dealt_combat_damage_this_turn: HashSet<PlayerId>,
-    /// CR 702.76a + CR 608.2i: Per-player set of the creature types of any source
-    /// that dealt combat damage to a player this turn while under that player's
-    /// control (snapshot at damage-dealing time — "looks back in time", so a
-    /// source that later changes types or leaves does not invalidate the entry).
+    /// CR 702.76a + CR 608.2i: Set of `(controller, creature type)` entries for
+    /// sources that dealt combat damage to a player this turn (snapshot at
+    /// damage-dealing time — "looks back in time", so a source that later
+    /// changes types or leaves does not invalidate the entry). Flat persistent
+    /// storage keeps `GameState::clone()` structurally shared on AI/search paths.
     /// Populated by the `DamageDealt` observer in `game::triggers` and cleared in
     /// `turns::start_next_turn` per CR 514. Read by `casting_variant_candidates`
     /// to gate the Prowl cast permission ("had any of this spell's creature types").
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub creature_types_dealt_combat_damage_this_turn: HashMap<PlayerId, HashSet<String>>,
+    #[serde(default, skip_serializing_if = "im::HashSet::is_empty")]
+    pub creature_types_dealt_combat_damage_this_turn: im::HashSet<(PlayerId, String)>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -5920,7 +5921,7 @@ impl GameState {
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
             assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
-            creature_types_dealt_combat_damage_this_turn: HashMap::new(),
+            creature_types_dealt_combat_damage_this_turn: im::HashSet::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),

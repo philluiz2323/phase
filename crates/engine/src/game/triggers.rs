@@ -1829,11 +1829,11 @@ fn collect_pending_triggers(
                 // controller so Prowl can later check "had any of this spell's
                 // creature types". A source with no subtypes contributes nothing.
                 if !source_subtypes.is_empty() {
-                    state
-                        .creature_types_dealt_combat_damage_this_turn
-                        .entry(controller)
-                        .or_default()
-                        .extend(source_subtypes);
+                    state.creature_types_dealt_combat_damage_this_turn.extend(
+                        source_subtypes
+                            .into_iter()
+                            .map(|creature_type| (controller, creature_type)),
+                    );
                 }
             }
         }
@@ -18695,8 +18695,7 @@ mod dedup_regression_tests {
         assert!(
             state
                 .creature_types_dealt_combat_damage_this_turn
-                .get(&PlayerId(0))
-                .is_some_and(|types| types.contains("Rogue")),
+                .contains(&(PlayerId(0), "Rogue".to_string())),
             "Rogue combat damage must seed the Prowl creature-type ledger under P0; ledger = {:?}",
             state.creature_types_dealt_combat_damage_this_turn,
         );

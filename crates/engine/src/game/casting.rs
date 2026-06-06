@@ -2551,12 +2551,14 @@ fn casting_variant_candidates(
             .any(|k| matches!(k, Keyword::Prowl(_)))
         && state
             .creature_types_dealt_combat_damage_this_turn
-            .get(&player)
-            .is_some_and(|types| {
-                obj.card_types
-                    .subtypes
-                    .iter()
-                    .any(|spell_type| types.contains(spell_type))
+            .iter()
+            .any(|(controller, creature_type)| {
+                *controller == player
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|spell_type| spell_type == creature_type)
             })
     {
         candidates.push(CastingVariant::Prowl);
@@ -12869,9 +12871,7 @@ mod tests {
         let object_id = add_prowl_spell(&mut state);
         state
             .creature_types_dealt_combat_damage_this_turn
-            .entry(PlayerId(0))
-            .or_default()
-            .insert("Rogue".to_string());
+            .insert((PlayerId(0), "Rogue".to_string()));
 
         let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
         assert!(
@@ -12907,9 +12907,7 @@ mod tests {
         let object_id = add_prowl_spell(&mut state); // spell is a Rogue
         state
             .creature_types_dealt_combat_damage_this_turn
-            .entry(PlayerId(0))
-            .or_default()
-            .insert("Goblin".to_string());
+            .insert((PlayerId(0), "Goblin".to_string()));
 
         let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
         assert!(
@@ -12926,9 +12924,7 @@ mod tests {
         let object_id = add_prowl_spell(&mut state);
         state
             .creature_types_dealt_combat_damage_this_turn
-            .entry(PlayerId(0))
-            .or_default()
-            .insert("Rogue".to_string());
+            .insert((PlayerId(0), "Rogue".to_string()));
         assert!(
             casting_variant_candidates(&state, PlayerId(0), object_id)
                 .contains(&CastingVariant::Prowl),
