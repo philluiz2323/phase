@@ -4333,18 +4333,8 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
 /// just-tapped permanent is captured as the resolution's "that creature" referent
 /// (CR 608.2c) and reached via `QuantityRef::Power { scope: Anaphoric }`.
 ///
-/// Eligibility note: the tap filter is "another untapped creature you control."
-/// CR 702.154a's "didn't choose to attack with" is largely covered (attackers tap
-/// unless they have vigilance), but the "haste or controlled since the turn began"
-/// (summoning-sickness) refinement is not yet expressible as a `FilterProp`; it is
-/// left as a follow-up tightening rather than blocking the core mechanic.
 fn build_enlist_trigger() -> TriggerDefinition {
-    // CR 702.154a: "up to one untapped creature you control."
-    let tap_target = TargetFilter::Typed(
-        TypedFilter::creature()
-            .controller(ControllerRef::You)
-            .properties(vec![FilterProp::Untapped]),
-    );
+    let tap_target = enlist_tap_target_filter();
 
     // CR 702.154a: "this creature gets +X/+0 until end of turn, where X is the
     // tapped creature's power." `Power { scope: Anaphoric }` reads the
@@ -4387,6 +4377,30 @@ fn build_enlist_trigger() -> TriggerDefinition {
              is the tapped creature's power."
                 .to_string(),
         )
+}
+
+fn enlist_tap_target_filter() -> TargetFilter {
+    // CR 702.154a-c: the enlisted creature must be another untapped creature you
+    // control, must not be a creature you chose to attack with, and must either
+    // have haste or have been controlled continuously since turn began.
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::Untapped,
+                        FilterProp::HasHasteOrControlledSinceTurnBegan,
+                    ]),
+            ),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+                )),
+            },
+        ],
+    }
 }
 
 /// CR 702.154a: Identity predicate for a synthesized Enlist trigger — an optional
@@ -11695,23 +11709,54 @@ mod provoke_synthesis_tests {
             "Enlist is a 'you may' trigger (CR 702.154a)"
         );
 
-        // Parent body taps an untapped creature you control.
-        let Effect::Tap {
-            target: TargetFilter::Typed(tf),
-        } = &*execute.effect
-        else {
-            panic!("execute body must be Effect::Tap over a TypedFilter");
+        // Parent body taps an eligible Enlist creature.
+        let Effect::Tap { target } = &*execute.effect else {
+            panic!("execute body must be Effect::Tap");
         };
+        let TargetFilter::And { filters } = target else {
+            panic!("tap target must compose Enlist eligibility with TargetFilter::And");
+        };
+        let tf = filters
+            .iter()
+            .find_map(|filter| match filter {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .expect("tap target must include the creature eligibility typed filter");
+        let excludes_attackers = filters.iter().any(|filter| {
+            matches!(
+                filter,
+                TargetFilter::Not { filter }
+                    if matches!(
+                        filter.as_ref(),
+                        TargetFilter::Typed(tf)
+                            if tf.properties.contains(&FilterProp::Attacking)
+                    )
+            )
+        });
+        assert!(
+            excludes_attackers,
+            "tap target must exclude creatures chosen to attack with (CR 702.154a)"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "tap target must exclude the enlisting creature itself (CR 702.154c)"
+        );
         assert_eq!(
             tf.controller,
             Some(ControllerRef::You),
             "tap target must be a creature you control (CR 702.154a)"
         );
         assert!(
-            tf.properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::Untapped)),
+            tf.properties.contains(&FilterProp::Untapped),
             "tap target must be untapped (CR 702.154a), got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties
+                .contains(&FilterProp::HasHasteOrControlledSinceTurnBegan),
+            "tap target must either have haste or have been controlled since turn began \
+             (CR 702.154a), got {:?}",
             tf.properties
         );
 

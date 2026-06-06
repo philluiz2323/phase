@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
@@ -802,16 +802,15 @@ fn tapped_object_context_from_events(
     state: &GameState,
     events: &[GameEvent],
 ) -> Option<CostPaidObjectSnapshot> {
+    let mut seen = HashSet::new();
     let mut tapped = events.iter().filter_map(|event| match event {
-        GameEvent::PermanentTapped { object_id, .. } => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
-        }
+        GameEvent::PermanentTapped { object_id, .. } if seen.insert(*object_id) => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot {
+                object_id: *object_id,
+                lki: obj.snapshot_for_mana_spent(),
+            }),
         _ => None,
     });
     let first = tapped.next()?;
@@ -5699,6 +5698,42 @@ mod tests {
             parent_referent_context_from_events(&state, &events).is_none(),
             "two tapped creatures have no singular anaphoric referent"
         );
+    }
+
+    /// CR 608.2c: duplicate events for the same tapped creature still describe
+    /// one singular referent.
+    #[test]
+    fn duplicate_tap_events_for_same_creature_still_capture_single_referent() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tapped".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(4);
+            obj.base_toughness = Some(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+        }
+        let events = vec![
+            GameEvent::PermanentTapped {
+                object_id: creature,
+                caused_by: None,
+            },
+            GameEvent::PermanentTapped {
+                object_id: creature,
+                caused_by: None,
+            },
+        ];
+        let referent = parent_referent_context_from_events(&state, &events)
+            .expect("duplicate tap events for one creature still have a singular referent");
+        assert_eq!(referent.object_id, creature);
+        assert_eq!(referent.lki.power, Some(4));
     }
 
     #[test]
