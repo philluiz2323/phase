@@ -3241,7 +3241,25 @@ pub fn find_applicable_replacements(
         let is_entering = entering_object_id == Some(obj.id);
         let is_being_discarded = discarding_object_id == Some(obj.id);
 
-        if !in_scanned_zone && !is_entering && !is_being_discarded {
+        // CR 702.52a: Dredge functions only while the card is in a player's
+        // graveyard. The default Battlefield/Command scan misses it, so include a
+        // graveyard dredge card on its own controller's draw — "as long as you
+        // have at least N cards in your library" (CR 702.52b) is the offer gate.
+        // Strictly additive: gated on `Keyword::Dredge` in the graveyard, so no
+        // non-dredge object is affected.
+        let is_applicable_dredge = matches!(repl_def.event, ReplacementEvent::Draw)
+            && obj.zone == Zone::Graveyard
+            && matches!(event, ProposedEvent::Draw { player_id, .. } if *player_id == obj.controller)
+            && obj.keywords.iter().any(|k| {
+                matches!(k, crate::types::keywords::Keyword::Dredge(n)
+                    if state
+                        .players
+                        .iter()
+                        .find(|p| p.id == obj.controller)
+                        .is_some_and(|p| p.library.len() as u32 >= *n))
+            });
+
+        if !in_scanned_zone && !is_entering && !is_being_discarded && !is_applicable_dredge {
             continue;
         }
 
@@ -6038,6 +6056,105 @@ mod tests {
             1
         );
         assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
+    }
+
+    // CR 702.52a: a Dredge draw-replacement shaped like `synthesize_dredge`'s.
+    fn dredge_draw_replacement_def() -> ReplacementDefinition {
+        let return_to_hand = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let mut mill = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        );
+        mill.sub_ability = Some(Box::new(return_to_hand));
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+        repl.mode = ReplacementMode::Optional { decline: None };
+        repl.execute = Some(Box::new(mill));
+        repl
+    }
+
+    fn dredge_state(library_size: usize) -> GameState {
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Graveyard,
+            vec![dredge_draw_replacement_def()],
+        );
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Dredge(2));
+        let lib = &mut state.players[0].library;
+        lib.clear();
+        for i in 0..library_size {
+            lib.push_back(ObjectId(100 + i as u64));
+        }
+        state
+    }
+
+    /// CR 702.52a: a graveyard dredge card's draw-replacement applies on its
+    /// controller's draw when the library has at least N cards — even though the
+    /// scanner's default zones are Battlefield/Command.
+    #[test]
+    fn dredge_applies_from_graveyard_on_owner_draw_with_enough_library() {
+        let state = dredge_state(2);
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &owner_draw, &registry).len(),
+            1,
+            "dredge must apply on the owner's draw with library >= N"
+        );
+        // CR 614.1a default scope is controller-only: an opponent's draw never
+        // offers your dredge card.
+        let opponent_draw = ProposedEvent::Draw {
+            player_id: PlayerId(1),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &opponent_draw, &registry).is_empty(),
+            "dredge must not apply to an opponent's draw"
+        );
+    }
+
+    /// CR 702.52b: with fewer than N cards in library, dredge is not offered.
+    #[test]
+    fn dredge_not_applicable_when_library_smaller_than_n() {
+        let state = dredge_state(1); // 1 < Dredge 2
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &owner_draw, &registry).is_empty(),
+            "CR 702.52b: dredge must not apply when the library has fewer than N cards"
+        );
     }
 
     #[test]
