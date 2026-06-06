@@ -4064,6 +4064,14 @@ pub enum CastingVariant {
     /// matches a normal cast — no on-resolve special behavior — so this is a
     /// casting-context tag, not a resolution-affecting variant.
     Freerunning,
+    /// CR 702.76a: Cast from hand via Prowl's alternative cost. Legal only when a
+    /// player was dealt combat damage this turn by a source under the caster's
+    /// control that, at damage time, had any of this spell's creature types. The
+    /// printed mana cost is replaced by the `Keyword::Prowl(cost)` payload at cast
+    /// preparation (mirrors `Freerunning`/`Overload`). Resolution routing matches
+    /// a normal cast — no on-resolve special behavior — so this is a
+    /// casting-context tag, not a resolution-affecting variant.
+    Prowl,
     /// CR 702.133a: Cast from a graveyard via Jump-start. The card is cast for
     /// its normal mana cost plus an additional cost of discarding a card
     /// (CR 601.2b/601.2f–h) — so, like `Retrace`/`Aftermath`, this is an
@@ -4109,6 +4117,8 @@ impl CastingVariant {
             // CR 702.140a: Mutate replaces the spell's mana cost with the mutate
             // cost — an alternative cost, so only one may apply (CR 118.9a).
             | CastingVariant::Mutate
+            // CR 702.76a: Prowl substitutes the prowl cost for the printed cost.
+            | CastingVariant::Prowl
             | CastingVariant::Freerunning => true,
             CastingVariant::Normal
             | CastingVariant::Adventure
@@ -5064,6 +5074,15 @@ pub struct GameState {
     /// to gate the Freerunning cast permission on the spell's controller.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub assassin_or_commander_dealt_combat_damage_this_turn: HashSet<PlayerId>,
+    /// CR 702.76a + CR 608.2i: Per-player set of the creature types of any source
+    /// that dealt combat damage to a player this turn while under that player's
+    /// control (snapshot at damage-dealing time — "looks back in time", so a
+    /// source that later changes types or leaves does not invalidate the entry).
+    /// Populated by the `DamageDealt` observer in `game::triggers` and cleared in
+    /// `turns::start_next_turn` per CR 514. Read by `casting_variant_candidates`
+    /// to gate the Prowl cast permission ("had any of this spell's creature types").
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub creature_types_dealt_combat_damage_this_turn: HashMap<PlayerId, HashSet<String>>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -5895,6 +5914,7 @@ impl GameState {
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
             assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
+            creature_types_dealt_combat_damage_this_turn: HashMap::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
@@ -6308,6 +6328,8 @@ impl PartialEq for GameState {
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
             && self.assassin_or_commander_dealt_combat_damage_this_turn
                 == other.assassin_or_commander_dealt_combat_damage_this_turn
+            && self.creature_types_dealt_combat_damage_this_turn
+                == other.creature_types_dealt_combat_damage_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
             && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters
