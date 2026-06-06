@@ -2529,12 +2529,12 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
 /// to hand.
 ///
 /// The replacement functions while the card is in the graveyard. Two pieces make
-/// that work: (1) the draw-replacement default player-scope is controller-only
-/// (CR 614.1a), so it applies only on the dredge card's controller's draw — no
-/// `valid_player`/`valid_card` needed (and `valid_card: SelfRef` would not match a
-/// `Draw`, which has no affected object); (2) `find_applicable_replacements`
-/// includes graveyard dredge cards on their controller's draw, gated on library
-/// size >= N (CR 702.52b enforced at offer time).
+/// that work: (1) the draw-replacement default player-scope follows the dredge
+/// card's effective source player (CR 109.4 + CR 108.4a), so a graveyard card
+/// applies on its owner's draw — no `valid_player`/`valid_card` needed (and
+/// `valid_card: SelfRef` would not match a `Draw`, which has no affected object);
+/// (2) `find_applicable_replacements` includes graveyard dredge cards on that
+/// player's draw, gated on library size >= N (CR 702.52b enforced at offer time).
 pub fn synthesize_dredge(face: &mut CardFace) {
     let Some(n) = face.keywords.iter().find_map(|k| match k {
         Keyword::Dredge(n) => Some(*n),
@@ -2563,8 +2563,9 @@ pub fn synthesize_dredge(face: &mut CardFace) {
             face_down_profile: None,
         },
     );
-    // CR 702.52a: "mill N cards", then return — the controller mills their own
-    // library (the replacement's controller is the dredge card's owner).
+    // CR 702.52a: "mill N cards", then return — `TargetFilter::Controller`
+    // resolves through the replacement source player, which is the graveyard
+    // card's owner under CR 109.4 + CR 108.4a.
     let mut mill = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Mill {
@@ -9510,7 +9511,7 @@ mod madness_synthesis_tests {
             .find(|r| matches!(r.event, ReplacementEvent::Draw))
             .expect("dredge should add a Draw replacement");
         // "you may" → Optional; no valid_card (a Draw has no affected object, and
-        // the default player-scope is controller-only).
+        // the default player-scope follows the graveyard card's owner).
         assert!(matches!(
             repl.mode,
             crate::types::ability::ReplacementMode::Optional { .. }
