@@ -2214,9 +2214,13 @@ fn conspire_copy_ability_definition() -> AbilityDefinition {
     .condition(AbilityCondition::additional_cost_paid_any())
 }
 
-/// Idempotency-shape predicate for the Conspire copy-on-cast trigger. Distinct
-/// from Replicate/Gravestorm copy triggers by the absence of `repeat_for`
-/// (Conspire copies once, not per-count).
+/// CR 702.78a: Idempotency-shape predicate for the Conspire copy-on-cast
+/// trigger. Distinct from Replicate/Gravestorm copy triggers by the absence of
+/// `repeat_for` (Conspire copies once, not per-count).
+///
+/// This AST shape is intentionally shared with Casualty's once-copy trigger.
+/// No printed card currently has both Casualty and Conspire; if one appears,
+/// add a structural discriminator rather than matching trigger description text.
 fn is_conspire_copy_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::SpellCast)
         && matches!(t.valid_card, Some(TargetFilter::SelfRef))
