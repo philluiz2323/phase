@@ -7685,7 +7685,9 @@ fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u3
 
 /// CR 702.38a: Amplify N — "As this permanent enters, reveal any number of
 /// cards from your hand that share a creature type with it. This permanent
-/// enters with N +1/+1 counters on it for each card revealed this way."
+/// enters with N +1/+1 counters on it for each card revealed this way. You
+/// can't reveal this card or any other cards that are entering the battlefield
+/// at the same time as this card."
 ///
 /// CR 614.1c: an "as [this permanent] enters" clause is a replacement effect,
 /// so Amplify is synthesized as a `ReplacementEvent::Moved` replacement on
@@ -7708,7 +7710,7 @@ fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u3
 /// rare choice to reveal fewer cards) is a contained follow-up. It is a
 /// documented approximation in the spirit of Suspend's "doesn't use the stack".
 ///
-/// CR 702.38c: each Amplify instance functions independently and is cumulative;
+/// CR 702.38b: each Amplify instance functions independently and is cumulative;
 /// one replacement is emitted per `Keyword::Amplify(n)` instance, grouped by N.
 /// Per-N idempotency (`is_amplify_etb_replacement`) emits only the delta so
 /// re-running synthesis is a no-op.
@@ -7769,7 +7771,8 @@ pub fn synthesize_amplify(face: &mut CardFace) {
 
 /// CR 702.38a: "cards from your hand that share a creature type with it" — cards
 /// in the controller's hand whose creature types intersect the entering
-/// permanent's. `SharesQuality`'s `reference` resolves `SelfRef` to the
+/// permanent's. `FilterProp::Another` excludes this card itself from hand-entry
+/// paths; `SharesQuality`'s `reference` resolves `SelfRef` to the
 /// replacement source (the entering permanent), mirroring `conspire_tap_filter`.
 /// `TypedFilter::card()` (not `creature()`) so a non-creature card with a
 /// creature type (e.g. a Tribal instant) can qualify, exactly as the rule reads.
@@ -7779,6 +7782,7 @@ fn amplify_revealable_filter() -> TargetFilter {
             .controller(ControllerRef::You)
             .properties(vec![
                 FilterProp::InZone { zone: Zone::Hand },
+                FilterProp::Another,
                 FilterProp::SharesQuality {
                     quality: crate::types::ability::SharedQuality::CreatureType,
                     reference: Some(Box::new(TargetFilter::SelfRef)),
@@ -8275,7 +8279,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.38a + CR 614.1c: Amplify N — as-enters replacement adding N P1P1
     // counters per card in hand sharing a creature type with the entering
     // permanent (deterministic reveal-all of the strictly-beneficial reveal).
-    // Each instance functions independently (CR 702.38c).
+    // Each instance functions independently (CR 702.38b).
     synthesize_amplify(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
@@ -20248,6 +20252,13 @@ mod devour_synthesis_tests {
             "filter must be restricted to the controller's hand"
         );
         assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another)),
+            "filter must exclude the entering Amplify card itself"
+        );
+        assert!(
             typed.properties.iter().any(|p| matches!(
                 p,
                 FilterProp::SharesQuality {
@@ -20311,7 +20322,7 @@ mod devour_synthesis_tests {
         assert!(face.replacements.is_empty());
     }
 
-    /// CR 702.38c: each Amplify instance is cumulative and functions
+    /// CR 702.38b: each Amplify instance is cumulative and functions
     /// independently — one replacement per instance, discriminated by N.
     #[test]
     fn synthesize_amplify_emits_one_replacement_per_instance() {
