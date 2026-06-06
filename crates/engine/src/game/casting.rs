@@ -3525,6 +3525,8 @@ fn apply_non_floor_cost_modifiers(
     apply_battlefield_cost_modifiers(state, player, object_id, mana_cost);
     // CR 702.41a: Affinity — reduce cost by {1} per matching permanent controlled.
     apply_affinity_reduction(state, player, object_id, mana_cost);
+    // CR 702.125a: Undaunted — reduce cost by {1} per living opponent you have.
+    apply_undaunted_reduction(state, player, object_id, mana_cost);
     // CR 601.2f: One-shot pending cost reductions ("the next spell costs {N} less").
     apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
 }
@@ -4397,6 +4399,31 @@ fn apply_affinity_reduction(
                 .count() as u32;
             apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), count, false);
         }
+    }
+}
+
+/// CR 702.125a: Apply Undaunted cost reduction from the spell's own keyword.
+///
+/// "This spell costs {1} less to cast for each opponent you have." CR 702.125b:
+/// players who have left the game are not counted — `players::opponents` already
+/// returns only living opponents, so its length is exactly the CR count. Reduces
+/// the spell's generic mana cost by that count (floor at 0; colored pips are
+/// never reduced — `apply_cost_mod_to_mana` handles both).
+fn apply_undaunted_reduction(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    mana_cost: &mut ManaCost,
+) {
+    if !state.objects.contains_key(&spell_id) {
+        return;
+    }
+    if effective_spell_keywords(state, caster, spell_id)
+        .iter()
+        .any(|kw| matches!(kw, Keyword::Undaunted))
+    {
+        let opponents = super::players::opponents(state, caster).len() as u32;
+        apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), opponents, false);
     }
 }
 
@@ -17468,6 +17495,123 @@ mod tests {
             ),
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
+    }
+
+    /// CR 702.125a: Undaunted reduces the spell's generic cost by {1} per living
+    /// opponent. In a two-player game P0 has one opponent → {6}{B} becomes {5}{B}.
+    #[test]
+    fn undaunted_reduces_generic_by_living_opponent_count() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(2125),
+            PlayerId(0),
+            "Undaunted Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            };
+            obj.keywords.push(Keyword::Undaunted);
+        }
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 5,
+            },
+            "one opponent reduces generic from 6 to 5; the colored pip is untouched",
+        );
+    }
+
+    /// CR 702.125a: Without the keyword there is no reduction.
+    #[test]
+    fn undaunted_no_op_without_keyword() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(2126),
+            PlayerId(0),
+            "Plain Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            };
+        }
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            },
+            "no Undaunted keyword → no reduction",
+        );
+    }
+
+    /// CR 702.125b: Players who have left the game are not counted. With the only
+    /// opponent eliminated, the discount is zero.
+    #[test]
+    fn undaunted_does_not_count_eliminated_opponents() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(2127),
+            PlayerId(0),
+            "Undaunted Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            };
+            obj.keywords.push(Keyword::Undaunted);
+        }
+        // CR 702.125b: the lone opponent has left the game.
+        state.eliminated_players.push(PlayerId(1));
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            },
+            "an eliminated opponent must not be counted (CR 702.125b)",
+        );
     }
 
     /// CR 903.8 + CR 601.2f: A commander cast from the command zone still uses
