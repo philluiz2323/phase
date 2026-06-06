@@ -446,7 +446,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                     || has_disturb_keyword(state, obj_id)
                     || retrace_has_discardable_land(state, player, obj_id)
                     || jumpstart_has_discardable_card(state, player, obj_id)
-                    || graveyard_has_enough_for_escape(state, player, obj_id))
+                    || graveyard_has_enough_for_escape(state, player, obj_id)
+                    // CR 702.187b: Mayhem is eligible only while the card was
+                    // discarded this turn.
+                    || (was_discarded_this_turn(state, obj_id)
+                        && super::keywords::effective_mayhem_cost(state, obj_id).is_some()))
         })
     }));
 
@@ -552,6 +556,18 @@ fn has_harmonize_keyword(obj: &crate::game::game_object::GameObject) -> bool {
 /// CR 702.34: Check if an object has the Flashback keyword.
 fn has_flashback_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Flashback)
+}
+
+/// CR 702.187b: Mayhem may be used only "as long as you discarded this card
+/// this turn." The mark is stamped on the graveyard object at discard time and
+/// auto-expires when the turn advances, so a simple equality against the
+/// current turn number is the gate.
+fn was_discarded_this_turn(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.discarded_turn)
+        == Some(state.turn_number)
 }
 
 /// CR 702.81: Check if an object has the Retrace keyword.
@@ -719,6 +735,10 @@ fn has_effective_graveyard_cast_keyword(
         || has_flashback_keyword(state, object_id)
         || has_aftermath_keyword(state, object_id)
         || super::keywords::effective_disturb_cost(state, object_id).is_some()
+        // CR 702.187b: Mayhem makes the graveyard a castable zone only while the
+        // card was discarded this turn.
+        || (was_discarded_this_turn(state, object_id)
+            && super::keywords::effective_mayhem_cost(state, object_id).is_some())
 }
 
 fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
@@ -2413,6 +2433,14 @@ fn casting_variant_candidates(
         {
             candidates.push(CastingVariant::Harmonize);
         }
+        // CR 702.187b: Mayhem is available only while the card was discarded this
+        // turn. The cost may be printed or granted to graveyard cards by a static
+        // (Green Goblin), so query the effective off-zone keyword cost.
+        if super::keywords::effective_mayhem_cost(state, object_id).is_some()
+            && was_discarded_this_turn(state, object_id)
+        {
+            candidates.push(CastingVariant::Mayhem);
+        }
         if super::keywords::effective_flashback_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Flashback);
         }
@@ -2846,6 +2874,15 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
 
+    // CR 702.187b: Mayhem — use the mayhem mana cost when casting from graveyard,
+    // but only while the card was discarded this turn. The cost may be granted to
+    // graveyard cards by a static (Green Goblin), so use the off-zone-aware lookup.
+    let mayhem_cost = if obj.zone == Zone::Graveyard && was_discarded_this_turn(state, object_id) {
+        super::keywords::effective_mayhem_cost(state, object_id)
+    } else {
+        None
+    };
+
     // CR 702.190a: Sneak alt-cost when casting from HAND. The
     // `effective_sneak_cost` lookup goes through `effective_keyword_for_object`
     // so off-zone keyword grants (e.g., statics that grant Sneak to cards in
@@ -2948,6 +2985,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             CastingVariant::JumpStart
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
+        } else if mayhem_cost.is_some() {
+            CastingVariant::Mayhem
         } else if let Some(source) = graveyard_permission_src {
             // CR 110.4: For OncePerTurnPerPermanentType permissions, auto-pick
             // the slot when only one is available. When multiple slots are
@@ -3292,6 +3331,13 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.187b: When casting via Mayhem, the mayhem mana cost replaces the
+    // card's mana cost (an alternative cost paid from the graveyard).
+    let effective_mayhem_cost_for_path = if casting_variant == CastingVariant::Mayhem {
+        mayhem_cost
+    } else {
+        None
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || next_spell_without_paying
@@ -3320,6 +3366,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
             .or(effective_disturb_cost_for_path)
+            .or(effective_mayhem_cost_for_path)
             .or(effective_sneak_cost_for_path)
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
@@ -12618,6 +12665,123 @@ mod tests {
             prepared.mana_cost, state.objects[&object_id].mana_cost,
             "printed mana cost ({:?}) must NOT be paid when Freerunning override is selected",
             state.objects[&object_id].mana_cost,
+        );
+    }
+
+    fn mayhem_test_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        }
+    }
+
+    /// CR 702.187b: Put an instant with a printed "Mayhem {1}{R}" keyword in the
+    /// controller's graveyard. Printed graveyard keywords live in
+    /// `base_keywords` (the off-zone keyword pipeline seeds from there), and the
+    /// printed mana cost ({3}{R}{R}) differs from the mayhem cost so cost
+    /// substitution is observable.
+    fn add_mayhem_card_in_graveyard(state: &mut GameState) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(2187),
+            PlayerId(0),
+            "Mayhem Test Instant".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 3,
+        };
+        obj.base_keywords.push(Keyword::Mayhem(mayhem_test_cost()));
+        object_id
+    }
+
+    /// CR 702.187b: Mayhem may be used only "as long as you discarded this card
+    /// this turn." A card that reached the graveyard another way (e.g. milled)
+    /// must NOT be offered as a Mayhem cast.
+    #[test]
+    fn mayhem_unavailable_when_not_discarded_this_turn() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_mayhem_card_in_graveyard(&mut state);
+        // `discarded_turn` left None — the card was not discarded.
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Mayhem),
+            "Mayhem must not be a candidate when the card was not discarded this turn; \
+             got {candidates:?}",
+        );
+    }
+
+    /// CR 702.187b + CR 601.2b: When the card was discarded this turn, Mayhem is
+    /// surfaced as a candidate and preparation pays the mayhem cost rather than
+    /// the printed mana cost.
+    #[test]
+    fn mayhem_available_when_discarded_this_turn() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_mayhem_card_in_graveyard(&mut state);
+        let turn = state.turn_number;
+        // Stamp the discard mark exactly as the discard pipeline does.
+        state.objects.get_mut(&object_id).unwrap().discarded_turn = Some(turn);
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            candidates.contains(&CastingVariant::Mayhem),
+            "Mayhem must be a candidate when the card was discarded this turn; got {candidates:?}",
+        );
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            PlayerId(0),
+            object_id,
+            Some(CastingVariant::Mayhem),
+        )
+        .expect("mayhem override must prepare a spell cast");
+        assert_eq!(prepared.casting_variant, CastingVariant::Mayhem);
+        assert_eq!(
+            prepared.mana_cost,
+            mayhem_test_cost(),
+            "prepared mana cost must be the mayhem alt cost, not the printed mana cost",
+        );
+    }
+
+    /// CR 702.187b + CR 118.9a: Mayhem is an alternative cost (only one
+    /// alternative cost may apply to a spell), but — unlike Flashback and
+    /// Harmonize — it does NOT exile the spell when it leaves the stack. The
+    /// spell resolves to its normal zone, so a card can be discarded and
+    /// Mayhem-cast again on a later turn.
+    #[test]
+    fn mayhem_variant_resolves_without_exile() {
+        assert!(
+            CastingVariant::Mayhem.uses_alternative_cost(),
+            "Mayhem replaces the mana cost, so it is an alternative cost",
+        );
+        assert!(
+            !CastingVariant::Mayhem.exiles_when_leaving_stack_for_any_reason(),
+            "Mayhem must not exile on resolution (CR 702.187b)",
+        );
+        assert_eq!(
+            CastingVariant::Mayhem.stack_to_graveyard_replacement(),
+            None,
+            "Mayhem must not replace the stack→graveyard move with exile",
+        );
+    }
+
+    /// CR 702.187b + CR 514.2: The discard mark is turn-scoped — a card
+    /// discarded on an earlier turn is no longer Mayhem-castable.
+    #[test]
+    fn mayhem_unavailable_after_turn_advances() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_mayhem_card_in_graveyard(&mut state);
+        state.objects.get_mut(&object_id).unwrap().discarded_turn = Some(state.turn_number);
+
+        // A later turn: the mark no longer equals the current turn.
+        state.turn_number += 1;
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Mayhem),
+            "Mayhem must expire once the turn advances; got {candidates:?}",
         );
     }
 

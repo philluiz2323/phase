@@ -329,6 +329,7 @@ pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
 pub(crate) enum GraveyardGrantedKeywordKind {
     Flashback,
     Escape,
+    Mayhem,
 }
 
 impl GraveyardGrantedKeywordKind {
@@ -339,6 +340,10 @@ impl GraveyardGrantedKeywordKind {
             }
             GraveyardGrantedKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
+            }
+            // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
+            GraveyardGrantedKeywordKind::Mayhem => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
         }
     }
@@ -643,6 +648,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // under one subject (Anti-Magic Aura, Consecrate Land). Split so the
     // CantBeEnchanted/CantBeEquipped clause is not dropped.
     if let Some(defs) = try_split_and_cant_be_attached(&stripped) {
+        return defs;
+    }
+
+    // CR 702.18a / CR 702.11a: "<grant or restriction> and can't be the target of
+    // …" pairs a first clause with a targeting restriction under one subject
+    // (Spectral Shield). Split so the CantBeTargeted/Hexproof clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_targeted(&stripped) {
         return defs;
     }
 

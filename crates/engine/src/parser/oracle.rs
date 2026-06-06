@@ -71,7 +71,7 @@ use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
     attach_die_result_branches_to_chain, normalize_self_refs_for_static,
     parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_escape_keyword,
-    parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
+    parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
     lower_static_ir, parse_cast_spells_alternative_cost_multi,
@@ -649,6 +649,31 @@ fn parse_graveyard_keyword_continuation(
                 exile_count,
             })
         }
+        GraveyardGrantedKeywordKind::Mayhem => {
+            // CR 702.187b: "The mayhem cost is equal to [its/that card's/the
+            // card's] mana cost." (Green Goblin's Goblin Formula). Mirrors the
+            // Flashback continuation; the cost resolves to the card's own mana
+            // cost via `ManaCost::SelfManaCost`.
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value((), tag("the mayhem cost is equal to ")).parse(i)
+            })?;
+            let rest_lower = rest.to_lowercase();
+            let (_, rest) = nom_on_lower(rest, &rest_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("that card's mana cost"),
+                        tag("the card's mana cost"),
+                        tag("its mana cost"),
+                    )),
+                )
+                .parse(i)
+            })?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::Mayhem(ManaCost::SelfManaCost))
+        }
     }
 }
 
@@ -1133,6 +1158,7 @@ fn is_spell_resolution_instruction_line(
         || lower_starts_with(&lower, "activate ")
         || lower_starts_with(&lower, "suspend ")
         || lower_starts_with(&lower, "harmonize ")
+        || lower_starts_with(&lower, "mayhem ")
         || lower_starts_with(&lower, "flashback")
         || lower_starts_with(&lower, "buyback")
         || lower_starts_with(&lower, "this spell costs ")
@@ -2832,6 +2858,18 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "harmonize ") {
             if let Some(harmonize_kw) = parse_harmonize_keyword(&line) {
                 result.extracted_keywords.push(harmonize_kw);
+                i += 1;
+                continue;
+            }
+        }
+
+        // CR 702.187b: Mayhem {cost} — parse mana cost from Oracle text, same as
+        // Harmonize. MTGJSON's keywords array carries only the bare "Mayhem"
+        // name, so the cost is extracted here. Must run before the spell
+        // imperative catch-all so the line is a keyword, not an effect.
+        if lower_starts_with(&lower, "mayhem ") {
+            if let Some(mayhem_kw) = parse_mayhem_keyword(&line) {
+                result.extracted_keywords.push(mayhem_kw);
                 i += 1;
                 continue;
             }
@@ -12279,6 +12317,126 @@ mod tests {
                     },
                 })
         }));
+    }
+
+    #[test]
+    fn top_level_static_mayhem_grant_stays_on_graveyard_cards() {
+        // CR 702.187b: Green Goblin's "Goblin Formula" grants Mayhem to every
+        // nonland card in the controller's graveyard, with the mayhem cost equal
+        // to that card's own mana cost (ManaCost::SelfManaCost). The general
+        // off-zone keyword-grant pipeline then surfaces it to the cast path
+        // (Norman Osborn // Green Goblin, #2354).
+        let result = parse(
+            "Each nonland card in your graveyard has mayhem.\nThe mayhem cost is equal to its mana cost.",
+            "Green Goblin",
+            &[],
+            &["Creature"],
+            &["Goblin", "Human", "Villain"],
+        );
+        assert!(result.extracted_keywords.is_empty());
+        assert_eq!(result.statics.len(), 1);
+        let static_def = &result.statics[0];
+        let TargetFilter::Typed(tf) = static_def
+            .affected
+            .as_ref()
+            .expect("expected affected filter")
+        else {
+            panic!("expected typed affected filter");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(crate::types::ability::ControllerRef::You)
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "missing graveyard filter: {:?}",
+            tf.properties
+        );
+        assert!(
+            static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Mayhem(ManaCost::SelfManaCost),
+                }),
+            "missing mayhem grant: {:?}",
+            static_def.modifications
+        );
+    }
+
+    #[test]
+    fn green_goblin_full_face_parses_mayhem_and_graveyard_cost_reduction() {
+        // CR 702.187b + CR 601.2f: The full Green Goblin face — flying/menace,
+        // the graveyard-cast cost reduction, and the Goblin Formula mayhem grant
+        // — must all parse (Norman Osborn // Green Goblin, #2354). The two novel
+        // statics (cost reduction scoped to graveyard casts, and the mayhem
+        // grant) are asserted here; the printed evasion keywords arrive via the
+        // MTGJSON keyword array.
+        use crate::types::statics::{CostModifyMode, StaticMode};
+        let result = parse(
+            "Flying, menace\n\
+             Spells you cast from your graveyard cost {2} less to cast.\n\
+             Goblin Formula — Each nonland card in your graveyard has mayhem. \
+             The mayhem cost is equal to its mana cost.",
+            "Green Goblin",
+            &[],
+            &["Creature"],
+            &["Goblin", "Human", "Villain"],
+        );
+        assert!(
+            result.statics.iter().any(|static_def| {
+                static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Mayhem(ManaCost::SelfManaCost),
+                    })
+            }),
+            "missing mayhem grant static: {:?}",
+            result.statics
+        );
+        assert!(
+            result.statics.iter().any(|static_def| {
+                matches!(
+                    &static_def.mode,
+                    StaticMode::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount: ManaCost::Cost { generic: 2, .. },
+                        ..
+                    }
+                )
+            }),
+            "missing graveyard-cast cost reduction static: {:?}",
+            result.statics
+        );
+    }
+
+    #[test]
+    fn green_goblin_goblin_formula_line_grants_mayhem() {
+        // CR 702.187b: the real card line carries the "Goblin Formula —" ability
+        // word and a parenthesized reminder; both must be stripped so the grant
+        // is recognized (Norman Osborn // Green Goblin, #2354).
+        let result = parse(
+            "Goblin Formula — Each nonland card in your graveyard has mayhem. \
+             The mayhem cost is equal to its mana cost. (You may cast a card from \
+             your graveyard for its mayhem cost if you discarded it this turn. \
+             Timing rules still apply.)",
+            "Green Goblin",
+            &[],
+            &["Creature"],
+            &["Goblin", "Human", "Villain"],
+        );
+        assert!(
+            result.statics.iter().any(|static_def| {
+                static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Mayhem(ManaCost::SelfManaCost),
+                    })
+            }),
+            "Green Goblin's Goblin Formula must grant Mayhem to graveyard cards; got {:?}",
+            result.statics
+        );
     }
 
     #[test]
