@@ -17520,7 +17520,7 @@ mod tests {
         }
 
         let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
-        super::super::casting::apply_self_spell_cost_modifiers(
+        super::super::casting::apply_non_floor_cost_modifiers(
             &state,
             PlayerId(0),
             obj_id,
@@ -17557,7 +17557,7 @@ mod tests {
         }
 
         let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
-        super::super::casting::apply_self_spell_cost_modifiers(
+        super::super::casting::apply_non_floor_cost_modifiers(
             &state,
             PlayerId(0),
             obj_id,
@@ -17598,7 +17598,7 @@ mod tests {
         state.eliminated_players.push(PlayerId(1));
 
         let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
-        super::super::casting::apply_self_spell_cost_modifiers(
+        super::super::casting::apply_non_floor_cost_modifiers(
             &state,
             PlayerId(0),
             obj_id,
