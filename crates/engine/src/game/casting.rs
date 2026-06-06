@@ -17594,8 +17594,15 @@ mod tests {
             };
             obj.keywords.push(Keyword::Undaunted);
         }
-        // CR 702.125b: the lone opponent has left the game.
-        state.eliminated_players.push(PlayerId(1));
+        // CR 702.125b: the lone opponent has left the game. `players::is_alive`
+        // reads the per-player `is_eliminated` flag, so set that (not the
+        // `eliminated_players` audit list).
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .is_eliminated = true;
 
         let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
         super::super::casting::apply_non_floor_cost_modifiers(
