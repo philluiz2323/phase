@@ -1525,7 +1525,8 @@ fn you_control_subtype_count(
         .iter()
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
-                if obj.controller != player {
+                // CR 702.26b: a phased-out permanent does not exist for "you control" counts.
+                if obj.controller != player || !obj.is_phased_in() {
                     return false;
                 }
                 if subtype.eq_ignore_ascii_case("commander") {
@@ -1568,7 +1569,11 @@ fn controlled_creature_power_count(
         let Some(obj) = state.objects.get(object_id) else {
             continue;
         };
-        if obj.controller != player || !obj.card_types.core_types.contains(&CoreType::Creature) {
+        // CR 702.26b: phased-out creatures do not contribute to controlled-creature counts.
+        if obj.controller != player
+            || !obj.is_phased_in()
+            || !obj.card_types.core_types.contains(&CoreType::Creature)
+        {
             continue;
         }
         if let Some(power) = obj.power {
@@ -1587,7 +1592,11 @@ fn controlled_land_same_name_count(
         let Some(obj) = state.objects.get(object_id) else {
             continue;
         };
-        if obj.controller == player && obj.card_types.core_types.contains(&CoreType::Land) {
+        // CR 702.26b: phased-out lands do not contribute to controlled-land counts.
+        if obj.controller == player
+            && obj.is_phased_in()
+            && obj.card_types.core_types.contains(&CoreType::Land)
+        {
             *counts.entry(obj.name.clone()).or_insert(0) += 1;
         }
     }
@@ -1736,6 +1745,7 @@ pub(crate) fn attack_target_matches_defended_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
     use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
@@ -1855,7 +1865,6 @@ mod tests {
     /// or contribute to "you control …" activation/casting conditions.
     #[test]
     fn phased_out_permanents_excluded_from_control_conditions() {
-        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         let player = PlayerId(0);
         let source_id = create_object(
@@ -1882,9 +1891,25 @@ mod tests {
             subtypes: vec!["forest".to_string()],
         };
 
-        let creature = create_object(
+        let matching_land = create_object(
             &mut state,
             CardId(3),
+            player,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&matching_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let same_name_land_cond = ParsedCondition::YouControlLandsWithSameNameAtLeast { count: 2 };
+
+        let creature = create_object(
+            &mut state,
+            CardId(4),
             player,
             "Beast".to_string(),
             Zone::Battlefield,
@@ -1896,12 +1921,63 @@ mod tests {
         }
         let power_cond = ParsedCondition::CreaturesYouControlTotalPowerAtLeast { minimum: 4 };
 
-        // Phased in: both conditions hold.
-        assert!(evaluate_condition(&state, player, source_id, &land_cond));
-        assert!(evaluate_condition(&state, player, source_id, &power_cond));
+        let goblin = create_object(
+            &mut state,
+            CardId(5),
+            player,
+            "Goblin One".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&goblin).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.power = Some(1);
+        }
+        let other_goblin = create_object(
+            &mut state,
+            CardId(6),
+            player,
+            "Goblin Two".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_goblin).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.power = Some(2);
+        }
+        let subtype_count_cond = ParsedCondition::YouControlSubtypeCountAtLeast {
+            subtype: "Goblin".to_string(),
+            count: 2,
+        };
+        let different_power_cond =
+            ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { count: 3 };
 
-        // Phase both out: neither holds (CR 702.26b).
-        for id in [land, creature] {
+        // Phased in: all conditions hold.
+        assert!(evaluate_condition(&state, player, source_id, &land_cond));
+        assert!(evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &same_name_land_cond
+        ));
+        assert!(evaluate_condition(&state, player, source_id, &power_cond));
+        assert!(evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &subtype_count_cond
+        ));
+        assert!(evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &different_power_cond
+        ));
+
+        // Phase them out: none of these "you control" conditions hold (CR 702.26b).
+        for id in [land, matching_land, creature, goblin, other_goblin] {
             state.objects.get_mut(&id).unwrap().phase_status = PhaseStatus::PhasedOut {
                 cause: PhaseOutCause::Directly,
             };
@@ -1913,6 +1989,18 @@ mod tests {
         assert!(
             !evaluate_condition(&state, player, source_id, &power_cond),
             "phased-out creature must not contribute to total power"
+        );
+        assert!(
+            !evaluate_condition(&state, player, source_id, &subtype_count_cond),
+            "phased-out Goblins must not satisfy YouControlSubtypeCountAtLeast"
+        );
+        assert!(
+            !evaluate_condition(&state, player, source_id, &different_power_cond),
+            "phased-out creatures must not satisfy YouControlDifferentPowerCreatureCountAtLeast"
+        );
+        assert!(
+            !evaluate_condition(&state, player, source_id, &same_name_land_cond),
+            "phased-out lands must not satisfy YouControlLandsWithSameNameAtLeast"
         );
     }
 
