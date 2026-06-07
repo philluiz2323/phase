@@ -3598,6 +3598,19 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
+                ConvokeMode::Delve
+                    if obj.zone == crate::types::zones::Zone::Graveyard && obj.owner == player =>
+                {
+                    // CR 702.66a: exile a graveyard card to pay one generic mana.
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: *obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                }
                 ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
                     // CR 702.51a: Colorless (for generic) always available
                     actions.push(candidate(

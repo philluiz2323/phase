@@ -3161,6 +3161,8 @@ fn apply_action(
                 ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
                 ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
                 ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
+                // CR 702.66a: delve has a dedicated handler arm below (exile, not tap).
+                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             if !is_eligible {
                 return Err(EngineError::ActionNotAllowed(
@@ -3194,6 +3196,7 @@ fn apply_action(
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
                 // CR 702.126a: Improvise pays generic mana only — always colorless.
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
+                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
             if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -3219,6 +3222,7 @@ fn apply_action(
                 ConvokeMode::Improvise => {
                     crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
                 }
+                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
                 p.mana_pool.add(unit);
@@ -3250,6 +3254,42 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: Some(mode),
+            }
+        }
+        // CR 702.66a: Delve — exile a card from the caster's graveyard to pay one
+        // generic mana. Unlike convoke/improvise (which tap a permanent), the
+        // source is a graveyard card that is exiled. The contribution is a
+        // generic-only colorless marker (like Improvise) that can't leak into the
+        // pool. (Tracking which cards were exiled — for Murktide Regent's "+1/+1
+        // for each card exiled with it" — is a follow-up that also needs the
+        // QuantityRef/parser wiring; the core payment is independent of it.)
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode: Some(ConvokeMode::Delve),
+            },
+            GameAction::TapForConvoke { object_id, .. },
+        ) => {
+            let player = *player;
+            let eligible = state
+                .objects
+                .get(&object_id)
+                .is_some_and(|o| o.zone == Zone::Graveyard && o.owner == player);
+            if !eligible {
+                return Err(EngineError::ActionNotAllowed(
+                    "Can only delve a card from your own graveyard".to_string(),
+                ));
+            }
+            zones::move_to_zone(state, object_id, Zone::Exile, &mut events);
+            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
+                p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    crate::types::mana::ManaType::Colorless,
+                    object_id,
+                ));
+            }
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode: Some(ConvokeMode::Delve),
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {

@@ -3780,6 +3780,8 @@ pub(super) fn pay_and_push_adventure(
             ConvokeMode::Convoke => o.is_convoke_eligible(player),
             ConvokeMode::Waterbend => o.is_waterbend_eligible(player),
             ConvokeMode::Improvise => o.is_improvise_eligible(player),
+            // CR 702.66a: delve needs at least one card in the caster's graveyard.
+            ConvokeMode::Delve => o.zone == Zone::Graveyard && o.owner == player,
         })
     });
 
@@ -5291,24 +5293,25 @@ pub(super) fn max_x_value_excluding(
         .find(|p| p.id == player)
         .map_or(0, |p| p.mana_pool.total() as u32);
 
+    let tap_payment_mode =
+        object_id.and_then(|oid| super::casting::spell_tap_payment_mode(state, player, oid));
+
     // CR 702.126a / 702.51a: tap-payment keywords (Improvise/Convoke/Waterbend)
     // let the caster pay generic mana by tapping permanents. The eligibility
     // predicate is spell-level (not per-object), so resolve it once here.
-    let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> =
-        object_id.and_then(|oid| {
-            match super::casting::spell_tap_payment_mode(state, player, oid) {
-                Some(ConvokeMode::Convoke) => {
-                    Some(super::game_object::GameObject::is_convoke_eligible as _)
-                }
-                Some(ConvokeMode::Waterbend) => {
-                    Some(super::game_object::GameObject::is_waterbend_eligible as _)
-                }
-                Some(ConvokeMode::Improvise) => {
-                    Some(super::game_object::GameObject::is_improvise_eligible as _)
-                }
-                None => None,
-            }
-        });
+    let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> = match tap_payment_mode
+    {
+        Some(ConvokeMode::Convoke) => {
+            Some(super::game_object::GameObject::is_convoke_eligible as _)
+        }
+        Some(ConvokeMode::Waterbend) => {
+            Some(super::game_object::GameObject::is_waterbend_eligible as _)
+        }
+        Some(ConvokeMode::Improvise) => {
+            Some(super::game_object::GameObject::is_improvise_eligible as _)
+        }
+        Some(ConvokeMode::Delve) | None => None,
+    };
 
     // CR 110.5 + CR 110.5c + CR 118.3: each untapped permanent is a single tap
     // unit. CR 702.126a / 702.51a: a tap-payment keyword (Improvise/Convoke/
@@ -5325,7 +5328,7 @@ pub(super) fn max_x_value_excluding(
     // — see #562. The per-permanent sum can over-count chain-sacrifice
     // configurations (tracked in #1235); colored-shard non-tap feasibility
     // is deferred separately (tracked in #1234).
-    let capacity: u32 = state
+    let permanent_capacity: u32 = state
         .battlefield
         .iter()
         .filter(|id| !excluded_sources.contains(id))
@@ -5337,11 +5340,29 @@ pub(super) fn max_x_value_excluding(
             mana.max(tap)
         })
         .sum();
+    // CR 702.66a-b: Delve applies after total cost is determined and can pay
+    // only generic mana by exiling cards from the caster's graveyard. Unlike
+    // tap-payment keywords, this is an additional graveyard-card channel rather
+    // than an alternative use of battlefield permanents.
+    let delve_capacity = if matches!(tap_payment_mode, Some(ConvokeMode::Delve)) {
+        state
+            .objects
+            .iter()
+            .filter(|(id, obj)| {
+                obj.zone == Zone::Graveyard
+                    && obj.owner == player
+                    && Some(**id) != object_id
+                    && !excluded_sources.contains(*id)
+            })
+            .count() as u32
+    } else {
+        0
+    };
 
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let available = pool + capacity;
+    let available = pool + permanent_capacity + delve_capacity;
     let formula_max = available.saturating_sub(fixed_portion) / x_count;
 
     // An object-less X cost (the `max_x_value` public path used by the
