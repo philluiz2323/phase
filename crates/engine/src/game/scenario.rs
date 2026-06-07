@@ -1476,6 +1476,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Blitz => {
                     "AlternativeCastChoice(Blitz)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Spectacle => {
+                    "AlternativeCastChoice(Spectacle)"
+                }
                 crate::types::game_state::AlternativeCastKeyword::Overload => {
                     "AlternativeCastChoice(Overload)"
                 }
@@ -1535,6 +1538,8 @@ impl GameRunner {
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
             WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
             WaitingFor::TimeTravelChoice { .. } => "TimeTravelChoice",
+            WaitingFor::AssistChoosePlayer { .. } => "AssistChoosePlayer",
+            WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
