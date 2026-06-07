@@ -1924,6 +1924,15 @@ pub enum CastOfferKind {
     },
 }
 
+/// CR 701.56a: Which half of a time-travel choice is currently being
+/// presented. Typed instead of boolean so serialized engine state says whether
+/// the player is adding or removing counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimeTravelPhase {
+    Remove,
+    Add,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -3093,13 +3102,14 @@ pub enum WaitingFor {
     /// objects (permanents they control with a time counter and/or suspended
     /// cards they own in exile with a time counter) and, for each, puts or
     /// removes a time counter. Modeled in two phases over
-    /// `GameAction::SelectTargets`: `adding == false` first selects objects to
-    /// remove a time counter from; then `adding == true` selects (from the
-    /// still-eligible remainder) objects to add a time counter to.
+    /// `GameAction::SelectTargets`: `TimeTravelPhase::Remove` first selects
+    /// objects to remove a time counter from; then `TimeTravelPhase::Add`
+    /// selects (from the still-eligible remainder) objects to add a time
+    /// counter to.
     TimeTravelChoice {
         player: PlayerId,
         eligible: Vec<TargetRef>,
-        adding: bool,
+        phase: TimeTravelPhase,
     },
     /// CR 603.7e: The affected player of a `ChooseObjectsIntoTrackedSet` effect
     /// selects any number of battlefield permanents from `eligible`. The

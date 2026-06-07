@@ -6,10 +6,10 @@
 //! Modeled like Proliferate (`WaitingFor::ProliferateChoice`), but with a
 //! per-object add/remove decision. To reuse `GameAction::SelectTargets` without
 //! a new action variant, the choice runs in two phases over
-//! `WaitingFor::TimeTravelChoice`. The remove phase (`adding == false`) is
-//! offered first: the player selects the objects to remove a time counter from
-//! (the common case — advancing suspended cards toward casting). The add phase
-//! (`adding == true`) then runs over the still-eligible remainder, selecting the
+//! `WaitingFor::TimeTravelChoice`. `TimeTravelPhase::Remove` is offered first:
+//! the player selects the objects to remove a time counter from (the common
+//! case — advancing suspended cards toward casting). `TimeTravelPhase::Add`
+//! then runs over the still-eligible remainder, selecting the
 //! objects to add a time counter to. An object selected in the remove phase is
 //! excluded from the add phase, so each object gets at most one of add/remove
 //! (CR 701.56a "for each of those objects, put ... or remove ...").
@@ -22,7 +22,7 @@
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, TimeTravelPhase, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -73,19 +73,19 @@ pub(crate) fn resolve(
     state.waiting_for = WaitingFor::TimeTravelChoice {
         player,
         eligible,
-        adding: false,
+        phase: TimeTravelPhase::Remove,
     };
     Ok(())
 }
 
-/// Apply one phase: put (`adding`) or remove a time counter on each selected
-/// object. The resulting counter events drive the existing suspend/vanishing
-/// triggers (free-cast on last removal, sacrifice, etc.).
+/// Apply one phase: put or remove a time counter on each selected object. The
+/// resulting counter events drive the existing suspend/vanishing triggers
+/// (free-cast on last removal, sacrifice, etc.).
 pub(crate) fn apply_phase(
     state: &mut GameState,
     player: PlayerId,
     selected: &[TargetRef],
-    adding: bool,
+    phase: TimeTravelPhase,
     events: &mut Vec<GameEvent>,
 ) {
     for target in selected {
@@ -94,20 +94,23 @@ pub(crate) fn apply_phase(
         };
         // Re-validate: an object may have left its zone between phases (e.g. a
         // suspended card whose last time counter was just removed and was cast).
-        if time_counters(state, *id) == 0 && !adding {
-            continue;
-        }
-        if adding {
-            super::counters::apply_counter_addition(
-                state,
-                player,
-                *id,
-                CounterType::Time,
-                1,
-                events,
-            );
-        } else {
-            super::counters::apply_counter_removal(state, *id, CounterType::Time, 1, events);
+        match phase {
+            TimeTravelPhase::Remove => {
+                if time_counters(state, *id) == 0 {
+                    continue;
+                }
+                super::counters::apply_counter_removal(state, *id, CounterType::Time, 1, events);
+            }
+            TimeTravelPhase::Add => {
+                super::counters::apply_counter_addition(
+                    state,
+                    player,
+                    *id,
+                    CounterType::Time,
+                    1,
+                    events,
+                );
+            }
         }
     }
 }
@@ -197,9 +200,13 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
             WaitingFor::TimeTravelChoice {
-                adding, eligible, ..
+                phase, eligible, ..
             } => {
-                assert!(!adding, "remove phase is offered first");
+                assert_eq!(
+                    *phase,
+                    TimeTravelPhase::Remove,
+                    "remove phase is offered first"
+                );
                 assert!(eligible.contains(&TargetRef::Object(perm)));
             }
             other => panic!("expected TimeTravelChoice, got {other:?}"),
@@ -209,7 +216,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(perm)],
-            false,
+            TimeTravelPhase::Remove,
             &mut events,
         );
         assert_eq!(time_counters(&state, perm), 1, "remove decrements 2 -> 1");
@@ -217,7 +224,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(perm)],
-            true,
+            TimeTravelPhase::Add,
             &mut events,
         );
         assert_eq!(time_counters(&state, perm), 2, "add increments 1 -> 2");

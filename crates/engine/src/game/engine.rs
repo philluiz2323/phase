@@ -4089,12 +4089,12 @@ fn apply_action(
             WaitingFor::TimeTravelChoice {
                 player,
                 eligible,
-                adding,
+                phase,
             },
             GameAction::SelectTargets { targets },
         ) => {
             let p = *player;
-            let adding_phase = *adding;
+            let phase = *phase;
             let eligible_set = eligible.clone();
             for t in &targets {
                 if !eligible_set.contains(t) {
@@ -4103,9 +4103,9 @@ fn apply_action(
                     ));
                 }
             }
-            effects::time_travel::apply_phase(state, p, &targets, adding_phase, &mut events);
+            effects::time_travel::apply_phase(state, p, &targets, phase, &mut events);
 
-            if !adding_phase {
+            if phase == crate::types::game_state::TimeTravelPhase::Remove {
                 // CR 701.56a: after the remove phase, offer the add phase over the
                 // still-eligible objects, excluding any just chosen to remove.
                 let add_eligible: Vec<_> = effects::time_travel::eligible_objects(state, p)
@@ -4116,7 +4116,7 @@ fn apply_action(
                     state.waiting_for = WaitingFor::TimeTravelChoice {
                         player: p,
                         eligible: add_eligible,
-                        adding: true,
+                        phase: crate::types::game_state::TimeTravelPhase::Add,
                     };
                     state.waiting_for.clone()
                 } else {
