@@ -21883,6 +21883,201 @@ mod tests {
             .contains(&KeywordKind::Convoke));
     }
 
+    // --- Assist (CR 702.132a) ---
+
+    fn make_assist_spell(state: &mut GameState) -> ObjectId {
+        let obj_id = create_creature_spell_in_hand(state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Assist);
+        obj_id
+    }
+
+    #[test]
+    fn assist_offers_player_choice_with_generic_cost() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_assist_spell(&mut state);
+        // CR 601.2g: the caster must be able to afford the cost to begin the cast.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("assist spell should begin casting");
+
+        match result {
+            WaitingFor::AssistChoosePlayer {
+                player,
+                candidates,
+                max_generic,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(candidates, vec![PlayerId(1)]);
+                assert_eq!(
+                    max_generic, 3,
+                    "max_generic mirrors the cost's generic ({{3}}{{R}})"
+                );
+            }
+            other => panic!("expected AssistChoosePlayer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assist_no_offer_without_generic_component() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_assist_spell(&mut state);
+        // CR 702.132a: assist only applies when the total cost has a generic part.
+        state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("assist spell should begin casting");
+
+        assert!(
+            !matches!(result, WaitingFor::AssistChoosePlayer { .. }),
+            "a pure-colored cost must not offer assist, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn assist_no_offer_without_other_players() {
+        let mut state = setup_game_at_main_phase();
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .is_eliminated = true;
+        let obj_id = make_assist_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("assist spell should begin casting");
+
+        assert!(
+            !matches!(result, WaitingFor::AssistChoosePlayer { .. }),
+            "with no eligible helper, assist must not be offered, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn assist_decline_proceeds_to_normal_payment() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_assist_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("assist spell should begin casting");
+        assert!(matches!(result, WaitingFor::AssistChoosePlayer { .. }));
+        state.waiting_for = result;
+
+        apply_as_current(&mut state, GameAction::ChooseAssistPlayer { player: None })
+            .expect("declining assist is legal");
+
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::AssistChoosePlayer { .. } | WaitingFor::AssistPayment { .. }
+            ),
+            "declining assist must leave the assist steps, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn assist_contribution_spends_helper_mana() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_assist_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        // CR 702.132a: the chosen player pays generic from their own mana.
+        add_mana(&mut state, PlayerId(1), ManaType::Colorless, 2);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("assist spell should begin casting");
+        state.waiting_for = result;
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseAssistPlayer {
+                player: Some(PlayerId(1)),
+            },
+        )
+        .expect("choosing an eligible helper is legal");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::AssistPayment { chosen, .. } if chosen == PlayerId(1)),
+            "expected AssistPayment routed to the chosen player, got {:?}",
+            state.waiting_for
+        );
+
+        let p1_before = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .mana_pool
+            .total();
+        apply_as_current(&mut state, GameAction::CommitAssistPayment { generic: 2 })
+            .expect("committing a feasible assist amount is legal");
+        let p1_after = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .mana_pool
+            .total();
+
+        assert_eq!(
+            p1_before - p1_after,
+            2,
+            "the assisting player should have spent 2 generic mana"
+        );
+        assert!(
+            state.pending_cast.is_none(),
+            "the cast should finalize once assist + caster mana cover the cost"
+        );
+    }
+
+    #[test]
+    fn assist_commit_rejects_over_max_generic() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_assist_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        add_mana(&mut state, PlayerId(1), ManaType::Colorless, 5);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("assist spell should begin casting");
+        state.waiting_for = result;
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseAssistPlayer {
+                player: Some(PlayerId(1)),
+            },
+        )
+        .unwrap();
+
+        // CR 702.132a: the helper may pay at most the spell's generic ({3}).
+        assert!(
+            apply_as_current(&mut state, GameAction::CommitAssistPayment { generic: 4 }).is_err(),
+            "contributing more than the cost's generic must be rejected"
+        );
+    }
+
     #[test]
     fn cast_with_keyword_convoke_honors_from_exile_filter() {
         let mut state = setup_game_at_main_phase();

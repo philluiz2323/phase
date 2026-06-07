@@ -2780,6 +2780,133 @@ fn apply_action(
             casting::apply_post_x_cost_modifiers(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
+        // CR 702.132a: Assist — caster chooses another player to help pay generic,
+        // or declines. `assist_offered` was already set when the offer was made, so
+        // both branches simply (re)enter the payment step from where they resume.
+        (
+            WaitingFor::AssistChoosePlayer {
+                player,
+                candidates,
+                max_generic,
+                convoke_mode,
+            },
+            GameAction::ChooseAssistPlayer { player: chosen },
+        ) => {
+            let caster = *player;
+            let convoke_mode = *convoke_mode;
+            match chosen {
+                None => {
+                    // CR 702.132a: declining proceeds to normal payment by the caster.
+                    casting_costs::enter_payment_step(state, caster, convoke_mode, &mut events)?
+                }
+                Some(p) => {
+                    if !candidates.contains(&p) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Player {p:?} is not an eligible assist helper"
+                        )));
+                    }
+                    WaitingFor::AssistPayment {
+                        caster,
+                        chosen: p,
+                        max_generic: *max_generic,
+                        convoke_mode,
+                    }
+                }
+            }
+        }
+        (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
+            let player = *player;
+            match state.pending_cast.take() {
+                Some(pending) => {
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                }
+                None => WaitingFor::Priority { player },
+            }
+        }
+        (WaitingFor::AssistChoosePlayer { .. }, GameAction::PassPriority) => {
+            return Err(EngineError::ActionNotAllowed(
+                "Must choose an assisting player or decline with ChooseAssistPlayer { player: None }, or CancelCast."
+                    .to_string(),
+            ));
+        }
+        // CR 702.132a: Assist — the chosen player commits how much generic mana to
+        // pay. The engine taps that player's mana sources for the committed amount
+        // and seeds the caster's pool with restricted (generic-only) mana so the
+        // caster's remaining cost is reduced; the cast then resumes at ManaPayment.
+        (
+            WaitingFor::AssistPayment {
+                caster,
+                chosen,
+                max_generic,
+                convoke_mode,
+            },
+            GameAction::CommitAssistPayment { generic },
+        ) => {
+            let caster = *caster;
+            let chosen = *chosen;
+            let max_generic = *max_generic;
+            let convoke_mode = *convoke_mode;
+            if generic > max_generic {
+                return Err(EngineError::InvalidAction(format!(
+                    "Assist contribution {generic} exceeds the maximum {max_generic}"
+                )));
+            }
+            if generic > 0 {
+                use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+                let probe = ManaCost::Cost {
+                    shards: Vec::new(),
+                    generic,
+                };
+                // Feasibility on a clone — auto-tapping must actually be able to
+                // produce the committed generic before any real taps happen.
+                let mut sim = state.clone();
+                let mut sink = Vec::new();
+                casting_costs::auto_tap_mana_sources(&mut sim, chosen, &probe, &mut sink, None);
+                let feasible = sim
+                    .players
+                    .iter()
+                    .find(|p| p.id == chosen)
+                    .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
+                if !feasible {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Assisting player cannot produce {generic} generic mana"
+                    )));
+                }
+                // Apply for real: tap the chosen player's sources and spend the
+                // committed generic from their pool.
+                casting_costs::auto_tap_mana_sources(state, chosen, &probe, &mut events, None);
+                if let Some(p) = state.players.iter_mut().find(|p| p.id == chosen) {
+                    mana_payment::pay_cost(&mut p.mana_pool, &probe).map_err(|e| {
+                        EngineError::InvalidAction(format!("Assist payment failed: {e:?}"))
+                    })?;
+                }
+                // CR 702.132a: the contribution covers the spell's generic — seed the
+                // caster's pool with restricted colorless units (mirroring convoke /
+                // improvise), which can only pay this spell and never leak into the pool.
+                let source_id = state.pending_cast.as_ref().map(|pending| pending.object_id);
+                if let (Some(src), Some(caster_p)) =
+                    (source_id, state.players.iter_mut().find(|p| p.id == caster))
+                {
+                    for _ in 0..generic {
+                        caster_p
+                            .mana_pool
+                            .add(ManaUnit::convoke_payment(ManaType::Colorless, src));
+                    }
+                }
+            }
+            casting_costs::enter_payment_step(state, caster, convoke_mode, &mut events)?
+        }
+        (WaitingFor::AssistPayment { caster, .. }, GameAction::CancelCast) => {
+            // No assist taps have happened yet (they occur atomically at commit),
+            // so cancelling here just rolls back the caster's pending cast.
+            let caster = *caster;
+            match state.pending_cast.take() {
+                Some(pending) => {
+                    engine_casting::cancel_pending_cast(state, caster, &pending, &mut events)
+                }
+                None => WaitingFor::Priority { player: caster },
+            }
+        }
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
         // that both this branch and the auto-pay path in `enter_payment_step` share.
         (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
@@ -11028,6 +11155,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            assist_offered: false,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -11410,6 +11538,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            assist_offered: false,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),

@@ -3797,6 +3797,28 @@ pub(super) fn pay_and_push_adventure(
         return enter_payment_step(state, player, convoke_mode, events);
     }
 
+    // CR 702.132a: Assist — the cost is now fully locked (no X / convoke / manual
+    // step pending), so before finalizing, a spell with assist and a generic
+    // component lets the caster choose another player to help pay it. Stash the
+    // pending cast so the assist answer handlers can resume via `enter_payment_step`.
+    if let Some((generic, candidates)) = assist_offer_params(state, player, object_id, cost) {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        pending.assist_offered = true;
+        state.pending_cast = Some(Box::new(pending));
+        return Ok(WaitingFor::AssistChoosePlayer {
+            player,
+            candidates,
+            max_generic: generic,
+            convoke_mode: None,
+        });
+    }
+
     // CR 107.4f + CR 601.2f: Pause before any Phyrexian shard would deduct life,
     // whether life is optional or the only legal route. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
@@ -5358,6 +5380,39 @@ pub(super) fn max_x_value_excluding(
 ///
 /// All sites that would otherwise construct `WaitingFor::ManaPayment` during a
 /// cast must go through this helper so X-selection and auto-pay are never bypassed.
+/// CR 702.132a: If the spell `object_id` being cast by `player` has assist, its
+/// locked `cost` includes a generic component, and at least one other player is
+/// still in the game, return `(generic, candidates)` — the generic amount the
+/// helper may pay and the eligible helper players. Returns `None` when assist
+/// does not apply. Shared by the `enter_payment_step` (X / convoke / manual) and
+/// `pay_and_push_adventure` (direct auto-finalize) offer sites.
+fn assist_offer_params(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> Option<(u32, Vec<PlayerId>)> {
+    let generic = match cost {
+        ManaCost::Cost { generic, .. } if *generic > 0 => *generic,
+        _ => return None,
+    };
+    if !super::casting::effective_spell_keywords(state, player, object_id)
+        .contains(&Keyword::Assist)
+    {
+        return None;
+    }
+    let candidates: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|p| p.id != player && !p.is_eliminated)
+        .map(|p| p.id)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    Some((generic, candidates))
+}
+
 pub fn enter_payment_step(
     state: &mut GameState,
     player: PlayerId,
@@ -5432,6 +5487,30 @@ pub fn enter_payment_step(
             .take()
             .expect("checked pending cast presence");
         return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    // CR 702.132a: Assist — once the total cost is locked (X chosen, modifiers
+    // applied) and before the caster pays, a spell with assist whose cost has a
+    // generic component lets the caster choose another player to help pay that
+    // generic mana. The offer is made once per cast (`assist_offered`). This site
+    // covers the X / convoke / manual paths that funnel through `enter_payment_step`;
+    // `pay_and_push_adventure` covers the direct auto-finalize path.
+    let assist_offer = state.pending_cast.as_ref().and_then(|pending| {
+        if pending.assist_offered {
+            return None;
+        }
+        assist_offer_params(state, player, pending.object_id, &pending.cost)
+    });
+    if let Some((generic, candidates)) = assist_offer {
+        if let Some(pending) = state.pending_cast.as_mut() {
+            pending.assist_offered = true;
+        }
+        return Ok(WaitingFor::AssistChoosePlayer {
+            player,
+            candidates,
+            max_generic: generic,
+            convoke_mode,
+        });
     }
 
     // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires
@@ -6036,6 +6115,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_offered: false,
         }
     }
 
@@ -9760,6 +9840,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_offered: false,
         };
 
         let result = pay_additional_cost(
@@ -9881,6 +9962,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_offered: false,
         };
 
         let mut events = Vec::new();
@@ -9971,6 +10053,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_offered: false,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -10050,6 +10133,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_offered: false,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -10162,6 +10246,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_offered: false,
         };
 
         let result = pay_additional_cost(
