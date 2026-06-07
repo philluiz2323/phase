@@ -908,14 +908,13 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
 fn parse_where_x_cost_reduction(rest: &str) -> Option<CostReduction> {
     let lower = rest.to_lowercase();
     let ((), where_x_clause) = nom_on_lower(rest, &lower, |i| {
-        let (i, _) = tag::<_, _, super::oracle_nom::error::OracleError<'_>>("{x}").parse(i)?;
-        let (i, _) = alt((
-            tag(" less to cast, where x is "),
-            tag(" less to cast where x is "),
-            tag(" less to activate, where x is "),
-            tag(" less to activate where x is "),
-        ))
-        .parse(i)?;
+        // Factor the varying axes (cast/activate, optional comma) into separate
+        // combinators rather than a cross-product alt of full phrases.
+        let (i, _) =
+            tag::<_, _, super::oracle_nom::error::OracleError<'_>>("{x} less to ").parse(i)?;
+        let (i, _) = alt((tag("cast"), tag("activate"))).parse(i)?;
+        let (i, _) = nom::combinator::opt(tag(",")).parse(i)?;
+        let (i, _) = tag(" where x is ").parse(i)?;
         Ok((i, ()))
     })?;
 
