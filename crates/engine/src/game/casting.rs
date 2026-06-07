@@ -8769,6 +8769,12 @@ pub(super) fn spell_tap_payment_mode(
         .any(|k| matches!(k, Keyword::Improvise))
     {
         Some(ConvokeMode::Improvise)
+    } else if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Delve))
+    {
+        // CR 702.66a: Delve exiles graveyard cards to pay generic mana.
+        Some(ConvokeMode::Delve)
     } else {
         None
     }
@@ -8839,6 +8845,21 @@ fn can_pay_with_spell_tap_payments(
                 })
                 .collect::<Vec<_>>();
             can_pay_with_convoke_options(&player_data.mana_pool, cost, ctx, permissions, &options)
+        }
+        ConvokeMode::Delve => {
+            // CR 702.66a: each card in the caster's graveyard can be exiled to pay
+            // one generic mana. Model each as a generic-only colorless unit, exactly
+            // like Improvise, so a spell castable only with delve is offered.
+            let mut pool = player_data.mana_pool.clone();
+            for (&object_id, obj) in &state.objects {
+                if obj.zone == Zone::Graveyard && obj.owner == player {
+                    pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                        crate::types::mana::ManaType::Colorless,
+                        object_id,
+                    ));
+                }
+            }
+            mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
         }
     }
 }
@@ -21950,6 +21971,142 @@ mod tests {
         ));
         assert!(effective_spell_keyword_kinds(&state, PlayerId(0), obj_id)
             .contains(&KeywordKind::Convoke));
+    }
+
+    // --- Delve (CR 702.66a) ---
+
+    fn make_delve_spell(state: &mut GameState) -> ObjectId {
+        let obj_id = create_creature_spell_in_hand(state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Delve);
+        obj_id
+    }
+
+    #[test]
+    fn delve_enters_mana_payment_with_graveyard_cards() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Old Spell".to_string(),
+            Zone::Graveyard,
+        );
+        // Affordable with mana alone; the delve modal still surfaces so the
+        // caster can choose to exile instead of pay.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("delve spell should begin casting");
+        assert!(
+            matches!(
+                result,
+                WaitingFor::ManaPayment {
+                    convoke_mode: Some(ConvokeMode::Delve),
+                    ..
+                }
+            ),
+            "expected ManaPayment in Delve mode, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn delve_no_mode_without_graveyard_cards() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        // Empty graveyard ⇒ delve offers nothing ⇒ normal payment.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("delve spell should begin casting");
+        assert!(
+            !matches!(
+                result,
+                WaitingFor::ManaPayment {
+                    convoke_mode: Some(ConvokeMode::Delve),
+                    ..
+                }
+            ),
+            "with an empty graveyard, delve must not be offered, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn delve_exiles_graveyard_card_for_generic() {
+        use super::super::engine::apply_as_current;
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        let gy = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Old Spell".to_string(),
+            Zone::Graveyard,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("delve spell should begin casting");
+        state.waiting_for = result;
+
+        apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::TapForConvoke {
+                object_id: gy,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .expect("delving a graveyard card is legal");
+
+        // CR 702.66a: the delved card is exiled.
+        assert_eq!(
+            state.objects.get(&gy).unwrap().zone,
+            Zone::Exile,
+            "the delved card should move to exile"
+        );
+    }
+
+    #[test]
+    fn delve_makes_spell_castable_via_graveyard() {
+        // CR 702.66a (#780): {3}{R} is castable with only {R} of mana when the
+        // graveyard supplies the {3} generic via delve.
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(80 + i),
+                PlayerId(0),
+                "GY".to_string(),
+                Zone::Graveyard,
+            );
+        }
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new());
+        assert!(
+            result.is_ok(),
+            "delve should make the spell castable with 1 mana + 3 graveyard cards: {result:?}"
+        );
+        assert!(matches!(
+            result.unwrap(),
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Delve),
+                ..
+            }
+        ));
     }
 
     #[test]

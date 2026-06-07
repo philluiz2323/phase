@@ -130,6 +130,10 @@ pub enum ConvokeMode {
     Waterbend,
     /// CR 702.126a: Improvise — tap an untapped artifact to pay one generic mana.
     Improvise,
+    /// CR 702.66a: Delve — exile a card from your graveyard to pay one generic
+    /// mana. Unlike the others, the "source" is a graveyard card that is exiled
+    /// (not a battlefield permanent that is tapped).
+    Delve,
 }
 
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.

@@ -3777,6 +3777,8 @@ pub(super) fn pay_and_push_adventure(
             ConvokeMode::Convoke => o.is_convoke_eligible(player),
             ConvokeMode::Waterbend => o.is_waterbend_eligible(player),
             ConvokeMode::Improvise => o.is_improvise_eligible(player),
+            // CR 702.66a: delve needs at least one card in the caster's graveyard.
+            ConvokeMode::Delve => o.zone == Zone::Graveyard && o.owner == player,
         })
     });
 
@@ -5280,6 +5282,11 @@ pub(super) fn max_x_value_excluding(
                 Some(ConvokeMode::Improvise) => {
                     Some(super::game_object::GameObject::is_improvise_eligible as _)
                 }
+                // CR 702.66a: delve pays from graveyard-card exile, not permanent
+                // taps, so it contributes no per-permanent X-cap capacity. (No
+                // printed card combines delve with an {X} cost, so this never
+                // understates a real spell's X.)
+                Some(ConvokeMode::Delve) => None,
                 None => None,
             }
         });
