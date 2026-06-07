@@ -132,6 +132,23 @@ pub enum ConvokeMode {
     Improvise,
 }
 
+/// CR 702.132a: Tracks the once-per-cast Assist offer/decision on a `PendingCast`.
+/// A typed enum (not a bool) so the offered-once guard and the committed
+/// contribution share one field. `Committed` defers the helper's actual mana
+/// spend to `finalize_cast`, so cancelling the cast never leaks tapped lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AssistState {
+    /// The Assist offer has not been made for this cast.
+    #[default]
+    NotOffered,
+    /// The offer was made and the caster declined (or contributed nothing).
+    Offered,
+    /// The caster chose `helper`, who will pay `generic` of the spell's generic
+    /// mana. The caster's owed cost is reduced by `generic` now; the helper's
+    /// sources are tapped only at `finalize_cast` (the non-cancellable commit).
+    Committed { helper: PlayerId, generic: u32 },
+}
+
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1121,11 +1138,12 @@ pub struct PendingCast {
     pub cancel_restore_prepared_source: Option<ObjectId>,
     #[serde(default)]
     pub payment_mode: CastPaymentMode,
-    /// CR 702.132a: Set once the Assist "choose another player" step has been
-    /// offered for this cast, so re-entering `enter_payment_step` after the
-    /// assist contribution (or a decline) does not re-offer it indefinitely.
+    /// CR 702.132a: Assist offer/decision for this cast. `NotOffered` until the
+    /// "choose another player" step is presented (so re-entering
+    /// `enter_payment_step` doesn't re-offer); `Committed` carries the helper and
+    /// the generic amount they will pay at `finalize_cast`.
     #[serde(default)]
-    pub assist_offered: bool,
+    pub assist_state: AssistState,
 }
 
 fn default_origin_zone() -> Zone {
@@ -1174,7 +1192,7 @@ impl PendingCast {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         }
     }
 
@@ -6815,7 +6833,7 @@ mod tests {
                 convoked_creatures: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
-                assist_offered: false,
+                assist_state: AssistState::NotOffered,
             })
         }
 
@@ -7142,7 +7160,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

@@ -712,7 +712,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: crate::types::game_state::AssistState::NotOffered,
         })
     }
 

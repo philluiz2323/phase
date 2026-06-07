@@ -22079,6 +22079,62 @@ mod tests {
     }
 
     #[test]
+    fn assist_cancel_after_commit_does_not_spend_helper_mana() {
+        // CR 601.2i: the helper's mana must not be spent if the caster cancels.
+        // The helper's tap/spend is deferred to finalize_cast, so a CancelCast at
+        // the (manual ⇒ cancellable) post-assist ManaPayment leaves them untouched.
+        use super::super::engine::apply_as_current;
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_assist_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        add_mana(&mut state, PlayerId(1), ManaType::Colorless, 2);
+
+        // Manual payment keeps the post-assist ManaPayment cancellable.
+        let result = handle_cast_spell_with_payment_mode(
+            &mut state,
+            PlayerId(0),
+            obj_id,
+            CardId(22),
+            crate::types::game_state::CastPaymentMode::Manual,
+            &mut Vec::new(),
+        )
+        .expect("assist spell should begin casting");
+        state.waiting_for = result;
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseAssistPlayer {
+                player: Some(PlayerId(1)),
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::CommitAssistPayment { generic: 2 })
+            .expect("committing assist is legal");
+
+        let p1_before = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .mana_pool
+            .total();
+        apply_as_current(&mut state, GameAction::CancelCast).expect("the caster may cancel");
+        let p1_after = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .mana_pool
+            .total();
+
+        assert_eq!(
+            (p1_before, p1_after),
+            (2, 2),
+            "cancelling the cast must not spend the assisting player's mana"
+        );
+    }
+
+    #[test]
     fn cast_with_keyword_convoke_honors_from_exile_filter() {
         let mut state = setup_game_at_main_phase();
         let source_id = create_object(

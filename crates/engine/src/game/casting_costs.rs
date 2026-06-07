@@ -7,8 +7,8 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit, GameState,
-    PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
+    AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit,
+    GameState, PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
     StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
@@ -3809,7 +3809,7 @@ pub(super) fn pay_and_push_adventure(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
-        pending.assist_offered = true;
+        pending.assist_state = AssistState::Offered;
         state.pending_cast = Some(Box::new(pending));
         return Ok(WaitingFor::AssistChoosePlayer {
             player,
@@ -5492,18 +5492,18 @@ pub fn enter_payment_step(
     // CR 702.132a: Assist — once the total cost is locked (X chosen, modifiers
     // applied) and before the caster pays, a spell with assist whose cost has a
     // generic component lets the caster choose another player to help pay that
-    // generic mana. The offer is made once per cast (`assist_offered`). This site
+    // generic mana. The offer is made once per cast (`assist_state`). This site
     // covers the X / convoke / manual paths that funnel through `enter_payment_step`;
     // `pay_and_push_adventure` covers the direct auto-finalize path.
     let assist_offer = state.pending_cast.as_ref().and_then(|pending| {
-        if pending.assist_offered {
+        if pending.assist_state != AssistState::NotOffered {
             return None;
         }
         assist_offer_params(state, player, pending.object_id, &pending.cost)
     });
     if let Some((generic, candidates)) = assist_offer {
         if let Some(pending) = state.pending_cast.as_mut() {
-            pending.assist_offered = true;
+            pending.assist_state = AssistState::Offered;
         }
         return Ok(WaitingFor::AssistChoosePlayer {
             player,
@@ -5543,6 +5543,39 @@ pub fn enter_payment_step(
 /// Called both from the `(ManaPayment, PassPriority)` branch in the main engine
 /// dispatcher and from `enter_payment_step` when classification skips the modal.
 /// This is the single authority for completing a mana payment.
+/// CR 702.132a: At the non-cancellable commit point (just before `finalize_cast`),
+/// spend a committed Assist contribution by tapping the helper's mana sources for
+/// the agreed generic amount. This is deferred to here — rather than performed at
+/// `CommitAssistPayment` — so a `CancelCast` at any intervening (still-cancellable)
+/// payment step never leaves the helper's lands tapped or their mana spent. The
+/// caster's owed cost was already reduced by `generic` at commit time. A no-op for
+/// non-assist casts and for declined/uncommitted assists.
+pub(super) fn apply_committed_assist(
+    state: &mut GameState,
+    pending: &PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let AssistState::Committed { helper, generic } = pending.assist_state else {
+        return Ok(());
+    };
+    if generic == 0 {
+        return Ok(());
+    }
+    let probe = ManaCost::Cost {
+        shards: Vec::new(),
+        generic,
+    };
+    auto_tap_mana_sources(state, helper, &probe, events, None);
+    if let Some(p) = state.players.iter_mut().find(|p| p.id == helper) {
+        mana_payment::pay_cost(&mut p.mana_pool, &probe).map_err(|e| {
+            EngineError::ActionNotAllowed(format!(
+                "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 pub fn finalize_mana_payment(
     state: &mut GameState,
     player: PlayerId,
@@ -5600,6 +5633,10 @@ pub fn finalize_mana_payment(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+
+    // CR 702.132a: commit point reached — apply any committed Assist contribution
+    // (tap the helper's sources) now that the cast can no longer be cancelled.
+    apply_committed_assist(state, &pending, events)?;
 
     if let Some(ability_index) = pending.activation_ability_index {
         let excluded_sources = pending
@@ -5749,6 +5786,10 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+
+    // CR 702.132a: commit point reached — apply any committed Assist contribution
+    // (tap the helper's sources) now that the cast can no longer be cancelled.
+    apply_committed_assist(state, &pending, events)?;
 
     if let Some(ability_index) = pending.activation_ability_index {
         let excluded_sources = pending
@@ -6115,7 +6156,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         }
     }
 
@@ -9840,7 +9881,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         };
 
         let result = pay_additional_cost(
@@ -9962,7 +10003,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         };
 
         let mut events = Vec::new();
@@ -10053,7 +10094,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -10133,7 +10174,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -10246,7 +10287,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            assist_offered: false,
+            assist_state: AssistState::NotOffered,
         };
 
         let result = pay_additional_cost(
