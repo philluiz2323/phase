@@ -844,6 +844,15 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         .parse(i)
     })?;
 
+    // CR 107.3 + CR 601.2f: "{X} less to cast/activate, where X is <dynamic value>".
+    // The reduction equals the dynamic value X, so each unit of X reduces by {1}
+    // (`amount_per = 1`) and `count` is the resolved where-X quantity. Routed
+    // through the shared where-X interpreter so devotion / total power / distinct-
+    // name / number-of-filter bindings all bind without a bespoke parser here.
+    if let Some(reduction) = parse_where_x_cost_reduction(rest) {
+        return Some(reduction);
+    }
+
     // Extract the {N} mana amount
     let rest_lower = rest.to_lowercase();
     let (mana_cost, after_mana) = parse_mana_symbols(&rest_lower)?;
@@ -885,6 +894,36 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         },
+    })
+}
+
+/// CR 107.3 + CR 601.2f: Parse the dynamic self-cost-reduction form
+/// "{X} less to cast/activate, where X is &lt;dynamic value&gt;" (the sibling of the
+/// "{N} less … for each &lt;clause&gt;" form). `rest` is the text after the
+/// "this spell/ability costs " prefix. The reduction amount IS the dynamic value
+/// X, so `amount_per = 1` and `count` is the where-X quantity expression resolved
+/// by the shared interpreter (`parse_where_x_quantity_expression` — devotion,
+/// total power/toughness/mana value, distinct names, number-of-filter, etc.).
+/// Strict-fails (`None`) for any where-X shape the interpreter doesn't recognize.
+fn parse_where_x_cost_reduction(rest: &str) -> Option<CostReduction> {
+    let lower = rest.to_lowercase();
+    let ((), where_x_clause) = nom_on_lower(rest, &lower, |i| {
+        let (i, _) = tag::<_, _, super::oracle_nom::error::OracleError<'_>>("{x}").parse(i)?;
+        let (i, _) = alt((
+            tag(" less to cast, where x is "),
+            tag(" less to cast where x is "),
+            tag(" less to activate, where x is "),
+            tag(" less to activate where x is "),
+        ))
+        .parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    let expr =
+        super::oracle_effect::lower::parse_where_x_quantity_expression(where_x_clause.trim())?;
+    Some(CostReduction {
+        amount_per: 1,
+        count: expr,
     })
 }
 
@@ -1176,6 +1215,58 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    // CR 107.3 + CR 601.2f: self-spell dynamic cost reduction
+    // "{X} less to cast, where X is <dynamic value>".
+    #[test]
+    fn cost_reduction_where_x_total_power() {
+        let r = try_parse_cost_reduction(
+            "This spell costs {X} less to cast, where X is the total power of creatures you control",
+        )
+        .expect("where-X cost reduction should parse");
+        // Reduction is {1} per unit of the dynamic X.
+        assert_eq!(r.amount_per, 1);
+        // X bound to a dynamic quantity (not a fixed value).
+        assert!(matches!(r.count, QuantityExpr::Ref { .. }));
+    }
+
+    #[test]
+    fn cost_reduction_where_x_distinct_names() {
+        let r = try_parse_cost_reduction(
+            "This spell costs {X} less to cast, where X is the number of differently named lands you control",
+        );
+        assert!(
+            r.is_some(),
+            "differently-named-lands where-X should parse: {r:?}"
+        );
+    }
+
+    #[test]
+    fn cost_reduction_where_x_devotion() {
+        let r = try_parse_cost_reduction(
+            "This spell costs {X} less to cast, where X is your devotion to black",
+        );
+        assert!(r.is_some(), "devotion where-X should parse: {r:?}");
+    }
+
+    #[test]
+    fn cost_reduction_for_each_still_works() {
+        // Regression: the pre-existing "{N} less … for each" form is unaffected.
+        let r = try_parse_cost_reduction(
+            "This spell costs {1} less to cast for each creature you control",
+        )
+        .expect("for-each cost reduction should still parse");
+        assert_eq!(r.amount_per, 1);
+    }
+
+    #[test]
+    fn cost_reduction_where_x_unrecognized_is_none() {
+        // CR strict-fail: an unrecognized where-X shape must not misparse.
+        assert!(try_parse_cost_reduction(
+            "This spell costs {X} less to cast, where X is the gobbledygook of nonsense"
+        )
+        .is_none());
     }
 
     // CR 702.24a: `parse_or_separated_mana_costs` building-block tests.
