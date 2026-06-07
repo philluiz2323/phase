@@ -13,15 +13,8 @@ use crate::types::zones::Zone;
 /// Reveal is modeled by moving the top N cards to exile (face up, like Cascade);
 /// the matching card is cast during resolution via the shared
 /// `initiate_cast_during_resolution` authority, and the non-cast revealed cards
-/// are shuffled to the bottom by the resolution-choice handler (so a declined or
-/// rejected cast bottoms them together with the hit).
-///
-/// SCOPE: a single reveal can contain more than one same-named card only when N
-/// is 2 or more (today only Thrumming Stone's granted Ripple 4; every printed
-/// ripple card is Ripple 1, so the reveal holds at most one match). This resolver
-/// offers the first match; casting additional same-named cards from one reveal
-/// is a follow-up. The far more common chain — each cast copy triggering its own
-/// ripple — already works, because every cast emits its own SpellCast trigger.
+/// are moved to the bottom by the resolution-choice handler after all same-named
+/// cards the player chooses to cast from this reveal have been offered.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -89,29 +82,28 @@ pub fn resolve(
         source_id: ability.source_id,
     });
 
-    // CR 702.60a: find a revealed card with the same name as the source spell.
-    let hit = revealed.iter().copied().find(|id| {
+    let (mut hits, revealed_misses): (Vec<_>, Vec<_>) = revealed.into_iter().partition(|id| {
         !source_name.is_empty() && state.objects.get(id).is_some_and(|o| o.name == source_name)
     });
 
-    match hit {
-        Some(hit_card) => {
-            let revealed_rest: Vec<ObjectId> =
-                revealed.into_iter().filter(|&id| id != hit_card).collect();
+    match hits.is_empty() {
+        false => {
+            let hit_card = hits.remove(0);
             // CR 702.60a: offer the free cast. The accept/decline + bottoming of
             // the rest is handled in `engine_resolution_choices`.
             state.waiting_for = WaitingFor::CastOffer {
                 player: controller,
                 kind: CastOfferKind::Ripple {
                     hit_card,
-                    revealed_rest,
+                    remaining_hits: hits,
+                    revealed_misses,
                 },
             };
         }
-        None => {
+        true => {
             // CR 702.60a: no same-named card revealed — put them all on the
-            // bottom of the library in a random order.
-            super::cascade::shuffle_to_bottom(state, &revealed, events);
+            // bottom of the library.
+            super::cascade::shuffle_to_bottom(state, &revealed_misses, events);
         }
     }
 
@@ -159,12 +151,45 @@ mod tests {
                 kind:
                     CastOfferKind::Ripple {
                         hit_card,
-                        revealed_rest,
+                        remaining_hits,
+                        revealed_misses,
                     },
                 ..
             } => {
                 assert_eq!(*hit_card, match_card);
-                assert_eq!(revealed_rest, &vec![other]);
+                assert!(remaining_hits.is_empty());
+                assert_eq!(revealed_misses, &vec![other]);
+            }
+            other => panic!("expected Ripple CastOffer, got {other:?}"),
+        }
+    }
+
+    /// CR 702.60a: all same-named cards revealed by one ripple remain eligible.
+    #[test]
+    fn offers_all_same_named_revealed_cards_before_misses() {
+        let (mut state, source_id) = setup("Surging Flame");
+        let first_match = add_library_card(&mut state, "Surging Flame");
+        let miss = add_library_card(&mut state, "Mountain");
+        let second_match = add_library_card(&mut state, "Surging Flame");
+        state.players[0].library = im::vector![first_match, miss, second_match];
+
+        let ability =
+            ResolvedAbility::new(Effect::Ripple { count: 3 }, vec![], source_id, PlayerId(0));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::Ripple {
+                        hit_card,
+                        remaining_hits,
+                        revealed_misses,
+                    },
+                ..
+            } => {
+                assert_eq!(*hit_card, first_match);
+                assert_eq!(remaining_hits, &vec![second_match]);
+                assert_eq!(revealed_misses, &vec![miss]);
             }
             other => panic!("expected Ripple CastOffer, got {other:?}"),
         }

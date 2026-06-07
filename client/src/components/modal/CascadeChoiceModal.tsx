@@ -40,7 +40,7 @@ export function CascadeChoiceModal() {
       <CascadeChoiceContent
         actionType="RippleChoice"
         hitCardId={kind.hit_card}
-        missCount={kind.revealed_rest.length}
+        missCount={kind.remaining_hits.length + kind.revealed_misses.length}
         promptKind="Ripple"
         dispatch={dispatch}
       />

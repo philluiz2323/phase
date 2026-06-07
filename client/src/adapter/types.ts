@@ -1046,7 +1046,7 @@ export type CastOfferKind =
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
   | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
-  | { type: "Ripple"; hit_card: ObjectId; revealed_rest: ObjectId[] };
+  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }

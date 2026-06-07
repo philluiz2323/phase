@@ -2149,11 +2149,13 @@ pub enum CastOfferKind {
     },
     /// CR 702.60a: Ripple — cast a revealed same-named card without paying its
     /// mana cost, or decline. `hit_card` is the matching revealed card being
-    /// offered; `revealed_rest` are the other revealed cards (which go to the
-    /// bottom of the library in a random order once the offer resolves).
+    /// offered, `remaining_hits` are other same-named cards from the same reveal
+    /// still eligible to cast, and `revealed_misses` are revealed cards that
+    /// cannot be cast this way.
     Ripple {
         hit_card: ObjectId,
-        revealed_rest: Vec<ObjectId>,
+        remaining_hits: Vec<ObjectId>,
+        revealed_misses: Vec<ObjectId>,
     },
 }
 
