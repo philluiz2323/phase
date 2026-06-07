@@ -2143,6 +2143,14 @@ pub enum CastOfferKind {
         #[serde(default)]
         discover_value: u32,
     },
+    /// CR 702.60a: Ripple — cast a revealed same-named card without paying its
+    /// mana cost, or decline. `hit_card` is the matching revealed card being
+    /// offered; `revealed_rest` are the other revealed cards (which go to the
+    /// bottom of the library in a random order once the offer resolves).
+    Ripple {
+        hit_card: ObjectId,
+        revealed_rest: Vec<ObjectId>,
+    },
 }
 
 /// CR 701.56a: Which half of a time-travel choice is currently being

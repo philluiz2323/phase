@@ -1533,6 +1533,10 @@ impl GameRunner {
                 kind: CastOfferKind::Cascade { .. },
                 ..
             } => "CascadeChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Ripple { .. },
+                ..
+            } => "RippleChoice",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
