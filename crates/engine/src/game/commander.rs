@@ -65,7 +65,7 @@ pub fn controls_any_commander(state: &GameState, player: PlayerId) -> bool {
             .objects
             .get(id)
             // CR 702.26b: a phased-out permanent is treated as though it does not exist.
-            .is_some_and(|obj| obj.controller == player && obj.is_phased_in() && obj.is_commander)
+            .is_some_and(|obj| obj.is_commander && obj.controller == player && obj.is_phased_in())
     })
 }
 
@@ -541,7 +541,8 @@ mod tests {
 
     #[test]
     fn phased_out_commander_excluded_from_control_conditions() {
-        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::game::game_object::PhaseOutCause;
+        use crate::game::phasing::phase_out_object;
 
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
@@ -553,9 +554,7 @@ mod tests {
         assert!(controls_own_commander(&state, PlayerId(0)));
 
         // CR 702.26b: a phased-out commander is treated as though it does not exist.
-        state.objects.get_mut(&cmd_id).unwrap().phase_status = PhaseStatus::PhasedOut {
-            cause: PhaseOutCause::Directly,
-        };
+        phase_out_object(&mut state, cmd_id, PhaseOutCause::Directly, &mut events);
         assert!(!controls_any_commander(&state, PlayerId(0)));
         assert!(!controls_own_commander(&state, PlayerId(0)));
     }
