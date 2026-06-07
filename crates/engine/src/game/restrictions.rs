@@ -1501,7 +1501,9 @@ fn you_control_land_with_any_subtype(
 ) -> bool {
     state.battlefield.iter().any(|object_id| {
         state.objects.get(object_id).is_some_and(|obj| {
+            // CR 702.26b: a phased-out land "does not exist" for this condition.
             obj.controller == player
+                && obj.is_phased_in()
                 && obj.card_types.core_types.contains(&CoreType::Land)
                 && obj.card_types.subtypes.iter().any(|subtype| {
                     subtypes
@@ -1551,7 +1553,8 @@ fn controlled_objects_matching_count(
             state
                 .objects
                 .get(object_id)
-                .is_some_and(|obj| obj.controller == player && predicate(obj))
+                // CR 702.26b: a phased-out permanent "does not exist" — exclude it.
+                .is_some_and(|obj| obj.controller == player && obj.is_phased_in() && predicate(obj))
         })
         .count()
 }
@@ -1600,7 +1603,10 @@ fn total_power_of_controlled_creatures(
         .iter()
         .filter_map(|object_id| state.objects.get(object_id))
         .filter(|obj| {
-            obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature)
+            // CR 702.26b: phased-out creatures do not contribute to the total.
+            obj.controller == player
+                && obj.is_phased_in()
+                && obj.card_types.core_types.contains(&CoreType::Creature)
         })
         .map(|obj| obj.power.unwrap_or(0))
         .sum()
@@ -1843,6 +1849,71 @@ mod tests {
 
         state.objects.get_mut(&source_id).unwrap().attached_to = Some(land_id.into());
         assert!(!evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// CR 702.26b: a phased-out permanent "does not exist" — it must not satisfy
+    /// or contribute to "you control …" activation/casting conditions.
+    #[test]
+    fn phased_out_permanents_excluded_from_control_conditions() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+        }
+        let land_cond = ParsedCondition::YouControlLandSubtypeAny {
+            subtypes: vec!["forest".to_string()],
+        };
+
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            player,
+            "Beast".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+        }
+        let power_cond = ParsedCondition::CreaturesYouControlTotalPowerAtLeast { minimum: 4 };
+
+        // Phased in: both conditions hold.
+        assert!(evaluate_condition(&state, player, source_id, &land_cond));
+        assert!(evaluate_condition(&state, player, source_id, &power_cond));
+
+        // Phase both out: neither holds (CR 702.26b).
+        for id in [land, creature] {
+            state.objects.get_mut(&id).unwrap().phase_status = PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            };
+        }
+        assert!(
+            !evaluate_condition(&state, player, source_id, &land_cond),
+            "phased-out Forest must not satisfy YouControlLandSubtypeAny"
+        );
+        assert!(
+            !evaluate_condition(&state, player, source_id, &power_cond),
+            "phased-out creature must not contribute to total power"
+        );
     }
 
     #[test]
