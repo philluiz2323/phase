@@ -18,12 +18,13 @@
 
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectError, EffectKind, FilterProp,
-    MultiTargetSpec, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
-    TargetRef, TypedFilter,
+    AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, EffectError, EffectKind,
+    FilterProp, MultiTargetSpec, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -38,12 +39,12 @@ fn graveyard_size(state: &GameState, player: PlayerId) -> usize {
         .unwrap_or(0)
 }
 
-fn controls_food(state: &GameState, player: PlayerId) -> bool {
-    state
-        .battlefield
-        .iter()
-        .filter_map(|id| state.objects.get(id))
-        .any(|obj| obj.controller == player && obj.card_types.subtypes.iter().any(|s| s == "Food"))
+fn controls_food(state: &GameState, player: PlayerId, source_id: ObjectId) -> bool {
+    // Reuse the layer-aware, phased-out-aware control-count building block
+    // (CR 702.26b) rather than a raw battlefield subtype scan, so the
+    // eligibility gate agrees with the `Sacrifice` resolver it gates.
+    let filter = TargetFilter::Typed(TypedFilter::permanent().subtype("Food".to_string()));
+    super::player_control_count_compares(state, player, &filter, Comparator::GE, 1, source_id)
 }
 
 /// CR 701.61a (exile mode): exile three chosen cards from the forager's
@@ -108,7 +109,7 @@ pub(crate) fn resolve(
     if graveyard_size(state, controller) >= FORAGE_EXILE_COUNT {
         branches.push(exile_three_branch());
     }
-    if controls_food(state, controller) {
+    if controls_food(state, controller, ability.source_id) {
         branches.push(sacrifice_food_branch());
     }
 
@@ -121,7 +122,11 @@ pub(crate) fn resolve(
             let mut resolved = build_resolved_from_def(&branch, ability.source_id, controller);
             resolved.context = ability.context.clone();
             resolved.set_scoped_player_recursive(controller);
-            super::resolve_ability_chain(state, &resolved, events, 0)?;
+            // Depth 1, not 0: `forage::resolve` already runs inside a resolution,
+            // so a depth-0 re-entry would re-run the depth-0 prelude mid-resolution
+            // (clearing chain-scoped state, re-bumping counters). Matches the
+            // depth-1 branch resolution the two-mode `choose_one_of` path uses.
+            super::resolve_ability_chain(state, &resolved, events, 1)?;
         }
         // CR 701.61a: both modes available — the forager chooses which.
         _ => {
