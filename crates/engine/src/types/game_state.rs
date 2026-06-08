@@ -4156,6 +4156,17 @@ impl StackEntry {
     }
 }
 
+/// CR 702.50a: Persistent "for the rest of the game" Epic record created when
+/// an Epic spell resolves. The stored stack entry is a copyable snapshot of the
+/// resolved spell; upkeep triggers use it to create non-cast spell copies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpicEffect {
+    pub controller: PlayerId,
+    pub source_entry: StackEntry,
+    pub source_name: String,
+    pub timestamp: u32,
+}
+
 /// CR 702.94a + CR 603.11: A pending miracle reveal offer queued during the
 /// resolution of an action that caused `player` to draw `object_id` as their
 /// first card of the turn. `cost` is the miracle mana cost taken from the
@@ -5041,6 +5052,11 @@ pub struct GameState {
     /// publishes SOS CR update.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paradigm_primed: Vec<ParadigmPrime>,
+
+    /// CR 702.50a: Epic creates a persistent "for the rest of the game"
+    /// effect that copies the resolved spell at the beginning of each upkeep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epic_effects: Vec<EpicEffect>,
 
     /// CR 603.7: Delayed triggered abilities waiting to fire.
     #[serde(default)]
@@ -6258,6 +6274,7 @@ impl GameState {
             pending_trigger_order: None,
             exile_links: Vec::new(),
             paradigm_primed: Vec::new(),
+            epic_effects: Vec::new(),
             delayed_triggers: Vec::new(),
             tracked_object_sets: HashMap::new(),
             next_tracked_set_id: 1,
@@ -6671,6 +6688,7 @@ impl PartialEq for GameState {
             && self.pending_trigger_order == other.pending_trigger_order
             && self.exile_links == other.exile_links
             && self.paradigm_primed == other.paradigm_primed
+            && self.epic_effects == other.epic_effects
             && self.delayed_triggers == other.delayed_triggers
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id

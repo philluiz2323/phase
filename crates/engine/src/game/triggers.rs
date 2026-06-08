@@ -830,6 +830,7 @@ fn collect_pending_triggers(
     // continuous effects before this pass scans for matching triggers.
     super::layers::flush_layers(state);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
+    super::epic::collect_upkeep_triggers(state, events, &mut pending);
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();

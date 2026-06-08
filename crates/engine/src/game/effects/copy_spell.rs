@@ -57,6 +57,9 @@ pub fn resolve(
         copy_obj.additional_cost_payment_count = 0;
         copy_obj.kickers_paid.clear();
         state.objects.insert(copy_id, copy_obj);
+        if super::super::epic::epic_source_entry(state, top_entry.id).is_some() {
+            super::super::epic::remove_epic_keyword_from_copy(state, copy_id);
+        }
     }
 
     // CR 707.10: The copy has the same characteristics as the original, but its
@@ -370,6 +373,9 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
             if entry.id == ability.source_id {
                 return Some(entry.clone());
             }
+        }
+        if let Some(entry) = super::super::epic::epic_source_entry(state, ability.source_id) {
+            return Some(entry);
         }
         return None;
     }

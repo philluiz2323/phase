@@ -410,6 +410,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // to Exile. Copies (`is_token`) never arm Paradigm because their card
     // name is derived but they are not "the" spell per the reminder. Assign
     // when WotC publishes SOS CR update.
+    if is_spell {
+        super::epic::register_epic_effect(state, &entry);
+    }
+
     let paradigm_armed = if is_spell {
         let obj = state.objects.get(&entry.id);
         let has_paradigm = obj.is_some_and(|o| {

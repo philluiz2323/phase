@@ -47,6 +47,10 @@ pub(crate) mod engine_priority;
 pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub(crate) mod engine_stack;
+pub mod epic;
+#[cfg(test)]
+#[path = "epic_tests.rs"]
+mod epic_tests;
 pub(crate) mod exile_links;
 pub mod filter;
 pub mod functioning_abilities;

@@ -2695,6 +2695,12 @@ fn prepare_spell_cast_with_variant_override_inner(
     variant_override: Option<CastingVariant>,
     mode: CastingMode,
 ) -> Result<PreparedSpellCast, EngineError> {
+    if super::epic::player_is_epic_locked(state, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "Player can't cast spells due to Epic".to_string(),
+        ));
+    }
+
     let obj = state
         .objects
         .get(&object_id)
@@ -8580,6 +8586,9 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
     // CR 702.61a: While a spell with split second is on the stack, players can't
     // cast spells (mana abilities are exempt per CR 702.61b, but spells are not).
     if super::keywords::stack_has_split_second(state) {
+        return false;
+    }
+    if super::epic::player_is_epic_locked(state, player) {
         return false;
     }
     let Ok(prepared) = prepare_spell_cast(state, player, object_id) else {
