@@ -360,27 +360,39 @@ fn pay_top_library_exile_cost(
         return Ok(false);
     }
 
-    for _ in 0..count {
-        let Some(card_id) = state
-            .players
-            .iter()
-            .find(|p| p.id == player)
-            .and_then(|p| p.library.front().copied())
-        else {
-            return Ok(false);
-        };
+    let top_cards = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| {
+            p.library
+                .iter()
+                .copied()
+                .take(count as usize)
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+    let mut zone_changes = Vec::with_capacity(top_cards.len());
+
+    for card_id in top_cards {
         let proposed =
             ProposedEvent::zone_change(card_id, Zone::Library, Zone::Exile, Some(source_id));
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(ProposedEvent::ZoneChange { object_id, to, .. }) => {
-                zones::move_to_zone(state, object_id, to, events);
+                zone_changes.push((object_id, to));
             }
-            ReplacementResult::Execute(_)
-            | ReplacementResult::Prevented
-            | ReplacementResult::NeedsChoice(_) => {
+            ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                return Ok(false);
+            }
+            ReplacementResult::NeedsChoice(_) => {
+                state.pending_replacement = None;
                 return Ok(false);
             }
         }
+    }
+
+    for (object_id, to) in zone_changes {
+        zones::move_to_zone(state, object_id, to, events);
     }
 
     Ok(true)
