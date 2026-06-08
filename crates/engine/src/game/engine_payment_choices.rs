@@ -1,4 +1,5 @@
 use crate::game::filter;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -9,6 +10,8 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
+use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 use super::casting;
@@ -340,6 +343,49 @@ pub(super) fn handle_unless_payment_choose_cost(
     }
 }
 
+fn pay_top_library_exile_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    count: u32,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EngineError> {
+    let library_len = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.library.len())
+        .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+    if library_len < count as usize {
+        return Ok(false);
+    }
+
+    for _ in 0..count {
+        let Some(card_id) = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .and_then(|p| p.library.front().copied())
+        else {
+            return Ok(false);
+        };
+        let proposed =
+            ProposedEvent::zone_change(card_id, Zone::Library, Zone::Exile, Some(source_id));
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange { object_id, to, .. }) => {
+                zones::move_to_zone(state, object_id, to, events);
+            }
+            ReplacementResult::Execute(_)
+            | ReplacementResult::Prevented
+            | ReplacementResult::NeedsChoice(_) => {
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
 pub(super) fn handle_unless_payment(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -523,27 +569,14 @@ pub(super) fn handle_unless_payment(
                 zone: Some(Zone::Library),
                 filter: None,
             } => {
-                let library_len = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.library.len())
-                    .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-                if library_len < count as usize {
+                if !pay_top_library_exile_cost(
+                    state,
+                    player,
+                    count,
+                    pending_effect.source_id,
+                    events,
+                )? {
                     payment_failed = true;
-                } else {
-                    for _ in 0..count {
-                        let Some(card_id) = state
-                            .players
-                            .iter()
-                            .find(|p| p.id == player)
-                            .and_then(|p| p.library.front().copied())
-                        else {
-                            payment_failed = true;
-                            break;
-                        };
-                        zones::move_to_zone(state, card_id, Zone::Exile, events);
-                    }
                 }
             }
             // CR 118.12: Return-to-hand unless cost. `from_zone` defaults to
