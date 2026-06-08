@@ -513,6 +513,39 @@ pub(super) fn handle_unless_payment(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
+            // CR 702.24a + CR 701.13: Thought Lash-style cumulative upkeep
+            // pays by exiling the top N cards of the payer's library. This is
+            // deterministic, so it does not need an object-selection prompt.
+            // Partial payments are not allowed; if the library has too few
+            // cards, the unless cost is unpayable and the sacrifice happens.
+            AbilityCost::Exile {
+                count,
+                zone: Some(Zone::Library),
+                filter: None,
+            } => {
+                let library_len = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player)
+                    .map(|p| p.library.len())
+                    .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+                if library_len < count as usize {
+                    payment_failed = true;
+                } else {
+                    for _ in 0..count {
+                        let Some(card_id) = state
+                            .players
+                            .iter()
+                            .find(|p| p.id == player)
+                            .and_then(|p| p.library.front().copied())
+                        else {
+                            payment_failed = true;
+                            break;
+                        };
+                        zones::move_to_zone(state, card_id, Zone::Exile, events);
+                    }
+                }
+            }
             // CR 118.12: Return-to-hand unless cost. `from_zone` defaults to
             // battlefield (the standard shape); `Some(Zone::Graveyard)` is
             // used by Harvest Wurm and similar.
