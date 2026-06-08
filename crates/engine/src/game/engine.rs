@@ -18956,7 +18956,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
         for index in 0..library_count {
             library_cards.push(create_object(
                 &mut state,
-                CardId(8000 + index),
+                CardId(8000 + u64::from(index)),
                 PlayerId(0),
                 format!("Library Card {}", index + 1),
                 Zone::Library,
