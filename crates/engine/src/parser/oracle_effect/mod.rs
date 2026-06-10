@@ -4683,8 +4683,14 @@ fn try_parse_conjure_duplicate(tp: TextPair) -> Option<Effect> {
         }
         filter
     } else {
+        // CR 707.2: demonstrative anaphors referring to the object the enclosing
+        // ability just established (the triggering / chosen / exiled object) all
+        // resolve to the inherited parent target. "that creature" (Goblin Morale
+        // Sergeant, Vodalian Tide Mage), "that spell" (Spellchain Scatter) and
+        // "that permanent" (Vona de Iedo) join the existing card-noun anaphors.
         match reference_lower.trim() {
-            "it" | "that card" | "this card" => TargetFilter::ParentTarget,
+            "it" | "that card" | "this card" | "that creature" | "that spell"
+            | "that permanent" => TargetFilter::ParentTarget,
             _ => return None,
         }
     };
@@ -39062,6 +39068,35 @@ mod tests {
                 assert!(!tapped);
             }
             other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    /// CR 707.2: the demonstrative anaphors "that creature" / "that spell" /
+    /// "that permanent" resolve to the inherited parent target, like "it" /
+    /// "that card" (Goblin Morale Sergeant, Spellchain Scatter, Vona de Iedo).
+    #[test]
+    fn conjure_duplicate_demonstrative_anaphors_resolve_to_parent_target() {
+        for reference in ["that creature", "that spell", "that permanent"] {
+            let e = parse_effect(&format!(
+                "conjure a duplicate of {reference} onto the battlefield"
+            ));
+            match e {
+                Effect::Conjure {
+                    cards, destination, ..
+                } => {
+                    assert!(
+                        matches!(
+                            &cards[0].source,
+                            ConjureSource::Duplicate { duplicate_of }
+                                if *duplicate_of == TargetFilter::ParentTarget
+                        ),
+                        "reference {reference:?}: expected Duplicate(ParentTarget), got {:?}",
+                        cards[0].source
+                    );
+                    assert_eq!(destination, Zone::Battlefield);
+                }
+                other => panic!("reference {reference:?}: expected Conjure, got {other:?}"),
+            }
         }
     }
 
