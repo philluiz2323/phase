@@ -4832,11 +4832,9 @@ mod tests {
         ) {
             match &*def.effect {
                 Effect::Discard { target, .. } => discard.push(target.clone()),
-                Effect::LoseLife { target, .. } => {
-                    if let Some(t) = target {
-                        lose.push(t.clone());
-                    }
-                }
+                Effect::LoseLife {
+                    target: Some(t), ..
+                } => lose.push(t.clone()),
                 _ => {}
             }
             if let Some(sub) = &def.sub_ability {
