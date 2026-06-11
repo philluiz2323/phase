@@ -333,7 +333,20 @@ fn try_parse_subject_become_clause(
     tag::<_, _, OracleError<'_>>("become ")
         .parse(predicate_lower.as_str())
         .ok()?;
-    let application = parse_subject_application(subject, ctx)?;
+    let mut application = parse_subject_application(subject, ctx)?;
+    // CR 119.3: "Each player's life total becomes N" / "All players' life
+    // totals become N" is a non-targeted set-life applying to *every* player.
+    // The general subject grammar resolves the "each player's life total"
+    // possessive into an empty typed filter, which the targeting layer reads
+    // as "choose a target player" — the Worldfire single-target prompt (issue
+    // #2882). Rebind it to the non-prompting `Controller` context-ref; the
+    // clause loop's `all_players_life_total_scope` derives the matching
+    // `PlayerFilter::All` fan-out, which rebinds the controller per iteration
+    // so each player's life total is set.
+    if all_players_life_total_scope(subject).is_some() {
+        application.affected = TargetFilter::Controller;
+        application.target = None;
+    }
     build_become_clause(application, &predicate, ctx)
 }
 
@@ -1363,6 +1376,33 @@ pub(super) fn parse_leading_subject_application(
 ) -> Option<SubjectApplication> {
     let subject_text = extract_subject_text(text)?;
     parse_subject_application(&subject_text, ctx)
+}
+
+/// CR 119.3: Detect the all-players life-total possessive subject ("each
+/// player's life total" / "all players' life totals") that leads a set-life
+/// clause, returning the `PlayerFilter::All` fan-out scope so the effect
+/// applies to *every* player rather than prompting for a single target.
+///
+/// This is non-consuming on purpose: `try_parse_set_life_total` still needs
+/// the full "<subject> becomes <quantity>" phrase to build the effect. The
+/// clause loop derives `player_scope` from the text independently of effect
+/// production (mirroring `strip_player_scope_subject`), so this is where the
+/// "each player's" possessive — which `strip_each_player_subject` does not
+/// cover because the subject is a *possessed noun* ("…'s life total"), not a
+/// bare agent ("each player <verb>") — turns into a fan-out. Pairs with the
+/// `TargetFilter::Controller` mapping in `parse_subject_application`, which the
+/// fan-out rebinds to each player per iteration.
+pub(super) fn all_players_life_total_scope(text: &str) -> Option<PlayerFilter> {
+    let lower = text.to_lowercase();
+    let matched = alt((
+        tag::<_, _, OracleError<'_>>("each player's life total"),
+        tag("all players' life totals"),
+        tag("all players' life total"),
+        tag("each player's life totals"),
+    ))
+    .parse(lower.as_str())
+    .is_ok();
+    matched.then_some(PlayerFilter::All)
 }
 
 /// CR 602.5 + CR 603.2a + CR 608.2c: Resolve the subject of an EFFECT-form
@@ -3529,6 +3569,48 @@ mod tests {
                         player: expected_player,
                     },
                 },
+                "wrong amount for {text:?}",
+            );
+        }
+    }
+
+    /// CR 119.3: "Each player's life total becomes N" / "All players' life
+    /// totals become N" is a non-targeted set-life that applies to *every*
+    /// player. It must parse with `player_scope: All` (the fan-out) and a
+    /// non-prompting `Controller` target — never an unscoped target that
+    /// prompts the caster to choose a single player (Worldfire, issue #2882).
+    #[test]
+    fn each_players_life_total_becomes_fixed_fans_out_to_all_players() {
+        for text in [
+            "each player's life total becomes 1",
+            "all players' life totals become 1",
+        ] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            assert_eq!(
+                ability.player_scope,
+                Some(PlayerFilter::All),
+                "expected All fan-out scope for {text:?}",
+            );
+            let Effect::SetLifeTotal { target, amount } = &*ability.effect else {
+                panic!(
+                    "expected SetLifeTotal for {text:?}, got {:?}",
+                    ability.effect
+                );
+            };
+            assert_eq!(
+                target,
+                &TargetFilter::Controller,
+                "set-life must bind the (fanned-out) controller, not a chosen \
+                 target, for {text:?}",
+            );
+            assert_eq!(
+                amount,
+                &QuantityExpr::Fixed { value: 1 },
                 "wrong amount for {text:?}",
             );
         }

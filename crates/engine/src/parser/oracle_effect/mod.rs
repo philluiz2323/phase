@@ -15746,7 +15746,14 @@ pub(crate) fn parse_effect_chain_ir(
             .or(carried_player_scope)
             // CR 101.4 + CR 608.2f: forward-carry from a preceding
             // "Repeat the following process for each <scope> [in turn order]."
-            .or(pending_player_scope_for_clause);
+            .or(pending_player_scope_for_clause)
+            // CR 119.3: "Each player's life total becomes N" / "All players'
+            // life totals become N" fans the set-life out over every player.
+            // The possessive subject ("…'s life total") is not a bare agent,
+            // so `strip_player_scope_subject` above does not catch it; derive
+            // the All scope here (non-consuming, so the SetLifeTotal parser
+            // keeps the full subject). See `all_players_life_total_scope`.
+            .or_else(|| subject::all_players_life_total_scope(&text));
 
         // CR 608.2e + CR 608.2c + CR 101.3: A decline-tail strips one of four
         // shapes (prepositional vs subject-only × optional `doesn't` vs
