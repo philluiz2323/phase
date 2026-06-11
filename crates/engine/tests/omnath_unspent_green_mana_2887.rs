@@ -4,36 +4,39 @@
 //!
 //! With the fix the static parses to `AddDynamicPower`/`AddDynamicToughness`
 //! over `QuantityRef::UnspentMana { Green }`, which the layer system resolves
-//! against the controller's mana pool. This drives the REAL layer-derivation
-//! path (`evaluate_layers`): the P/T read after derivation is computed by the
-//! engine from the floating green mana, not asserted into existence.
+//! against the controller's mana pool. This drives the REAL mana-production and
+//! layer-flush path: mana production marks layers dirty, and the P/T read after
+//! derivation is computed by the engine from the floating green mana.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 106.4: unspent mana stays in a player's mana pool.
 //!   - CR 613.4c: dynamic power/toughness-modifying continuous effects.
 
-use engine::game::layers::evaluate_layers;
+use engine::game::layers::flush_layers;
+use engine::game::mana_payment;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 
 const OMNATH: &str = "Omnath, Locus of Mana gets +1/+1 for each unspent green mana you have.";
 
 fn add_green(runner: &mut GameRunner, n: usize) {
     for _ in 0..n {
-        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
-            ManaType::Green,
+        let mut events = Vec::new();
+        mana_payment::produce_mana(
+            runner.state_mut(),
             ObjectId(0),
+            ManaType::Green,
+            P0,
             false,
-            vec![],
-        ));
+            &mut events,
+        );
     }
 }
 
 fn derived_power(runner: &mut GameRunner, id: ObjectId) -> i32 {
-    runner.state_mut().layers_dirty.mark_full();
-    evaluate_layers(runner.state_mut());
+    flush_layers(runner.state_mut());
     runner
         .state()
         .objects
@@ -44,8 +47,7 @@ fn derived_power(runner: &mut GameRunner, id: ObjectId) -> i32 {
 }
 
 fn derived_toughness(runner: &mut GameRunner, id: ObjectId) -> i32 {
-    runner.state_mut().layers_dirty.mark_full();
-    evaluate_layers(runner.state_mut());
+    flush_layers(runner.state_mut());
     runner
         .state()
         .objects

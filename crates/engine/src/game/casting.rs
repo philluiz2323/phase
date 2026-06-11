@@ -9984,7 +9984,7 @@ pub(super) fn pay_effect_mana_cost(
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (_spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
+    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
         &mut player_data.mana_pool,
         cost,
         None,
@@ -9994,6 +9994,9 @@ pub(super) fn pay_effect_mana_cost(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    if !spent_units.is_empty() {
+        state.layers_dirty.mark_full();
+    }
 
     for payment in &life_payments {
         let amount = u32::try_from(payment.amount).unwrap_or(0);
@@ -10099,6 +10102,9 @@ fn auto_tap_and_pay_cost_excluding(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    if !spent_units.is_empty() {
+        state.layers_dirty.mark_full();
+    }
 
     // CR 107.4f + CR 118.3b + CR 119.4 + CR 119.8: Each Phyrexian shard paid
     // with life routes through the single-authority life-cost helper so the

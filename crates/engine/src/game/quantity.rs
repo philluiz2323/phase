@@ -1096,7 +1096,7 @@ fn resolve_ref(
                     Some(c) => p
                         .mana_pool
                         .count_color(crate::types::mana::ManaType::from(*c)),
-                    None => p.mana_pool.total(),
+                    None => p.mana_pool.produced_mana_total(),
                 })
             })
             .unwrap_or(0),

@@ -6384,6 +6384,7 @@ pub(super) fn apply_committed_assist(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
+        state.layers_dirty.mark_full();
     }
     Ok(())
 }
