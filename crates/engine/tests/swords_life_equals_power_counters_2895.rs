@@ -2,7 +2,7 @@
 //!
 //! "Exile target creature. Its controller gains life equal to its power." must
 //! gain life equal to the exiled creature's power as last known immediately
-//! before it left the battlefield (CR 608.2g) — i.e. INCLUDING +1/+1 counters.
+//! before it left the battlefield (CR 608.2h) — i.e. INCLUDING +1/+1 counters.
 //! Previously the `Target` power scope read the live object after exile, where
 //! counters have been stripped, so a 3/3 with eight +1/+1 counters gained only
 //! 3 life instead of 11.
