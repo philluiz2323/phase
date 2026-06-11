@@ -1740,6 +1740,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::EpicCopy { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DestroyAll { target, .. }
+        // CR 613.3: mass gain-control reports its population `filter` like the
+        // other mass effects (Hellkite Tyrant — "all artifacts that player controls").
+        | Effect::GainControlAll { target, .. }
         // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
         // population `filter`, like the other mass effects.
         | Effect::SetTapState {

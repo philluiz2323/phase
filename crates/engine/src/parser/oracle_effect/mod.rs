@@ -7835,6 +7835,12 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
     {
+        // CR 613.3: untargeted mass form "gain control of all/each <filter>"
+        // (Hellkite Tyrant) lowers to `Effect::GainControlAll`.
+        let rest_lower = rest.to_ascii_lowercase();
+        let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
+            .parse(rest_lower.as_str())
+            .is_ok();
         let (target_text, _) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
@@ -7863,7 +7869,7 @@ fn try_parse_verb_and_target<'a>(
                 rem,
             ));
         }
-        return Some((TargetedImperativeAst::GainControl { target }, rem));
+        return Some((TargetedImperativeAst::GainControl { target, all }, rem));
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("earthbend ").parse(lower) {
@@ -44663,9 +44669,13 @@ mod tests {
         // Should have player_scope: All for "Each player"
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
 
-        // The effect should be GainControl with target filter including ownership
-        let Effect::GainControl { target } = &*def.effect else {
-            panic!("expected GainControl, got {:#?}", def.effect);
+        // CR 613.3: "gain control of ALL creatures they own" is the untargeted
+        // mass form → `GainControlAll`. Under the `player_scope: All` fanout
+        // (effects/mod.rs sets `ability.controller = scoped_player` per player),
+        // each player gains control of the creatures matching the ScopedPlayer
+        // ownership filter — i.e. their own — which is what Homeward Path does.
+        let Effect::GainControlAll { target } = &*def.effect else {
+            panic!("expected GainControlAll, got {:#?}", def.effect);
         };
 
         // Target should be Typed filter with ownership property
@@ -44681,7 +44691,7 @@ mod tests {
                     controller: ControllerRef::ScopedPlayer
                 }
             )),
-            "\"they own\" must add ownership filter to GainControl target, got {:#?}",
+            "\"they own\" must add ownership filter to the mass target, got {:#?}",
             typed
         );
     }

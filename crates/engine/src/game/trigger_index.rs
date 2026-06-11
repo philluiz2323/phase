@@ -642,7 +642,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
             push(TriggerEventKey::AttachmentChanged);
         }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
-        EffectKind::GainControl => push(TriggerEventKey::ChangesController),
+        EffectKind::GainControl | EffectKind::GainControlAll => {
+            push(TriggerEventKey::ChangesController)
+        }
         EffectKind::Fight => push(TriggerEventKey::Fight),
         EffectKind::Explore => push(TriggerEventKey::Explored),
         EffectKind::Discover => push(TriggerEventKey::DiscoverResolved),
