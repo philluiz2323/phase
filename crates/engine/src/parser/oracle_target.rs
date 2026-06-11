@@ -1597,15 +1597,6 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    // CR 105.1 + CR 105.2: Handle color adjective prefixes:
-    // "white creature", "red spell", "colorless creature", "multicolored card", etc.
-    let color_prop =
-        parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]));
-    if let Some((ref prop, color_len)) = color_prop {
-        properties.push(prop.clone());
-        pos += color_len;
-    }
-
     // CR 208.1 (#2912): a leading "N/M" power/toughness designation ("a 1/1
     // creature", "two 2/2 creatures") constrains the object's current power and
     // toughness — it is NOT a subtype. Emit a `PtComparison` for each side and
@@ -1626,6 +1617,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
             value: QuantityExpr::Fixed { value: toughness },
         });
         pos += consumed;
+    }
+
+    // CR 105.1 + CR 105.2: Handle color adjective prefixes:
+    // "white creature", "red spell", "colorless creature", "multicolored card", etc.
+    let color_prop =
+        parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]));
+    if let Some((ref prop, color_len)) = color_prop {
+        properties.push(prop.clone());
+        pos += color_len;
     }
 
     // CR 205.4b: Parse one or more comma-separated negation prefixes.
@@ -9179,6 +9179,20 @@ mod tests {
             "expected toughness == 1, got {:?}",
             tf.properties
         );
+
+        let (colored_filter, _rest) = parse_type_phrase("a 1/1 white creature you control");
+        let TargetFilter::Typed(colored_tf) = colored_filter else {
+            panic!("expected Typed filter, got {colored_filter:?}");
+        };
+        assert!(
+            colored_tf.properties.contains(&FilterProp::HasColor {
+                color: ManaColor::White
+            }),
+            "P/T designation must compose with color prefixes, got {:?}",
+            colored_tf.properties
+        );
+        assert!(colored_tf.properties.contains(&pt(PtStat::Power)));
+        assert!(colored_tf.properties.contains(&pt(PtStat::Toughness)));
 
         // End-to-end: Sword of the Meek's trigger filter must no longer be a
         // bogus `Subtype("1/1 Creature")`.
