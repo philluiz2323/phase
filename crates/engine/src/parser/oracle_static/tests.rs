@@ -7222,6 +7222,63 @@ fn static_self_gets_dynamic_power_for_each_creature() {
 }
 
 #[test]
+fn static_self_gets_dynamic_pt_for_each_unspent_green_mana() {
+    // CR 106.4 + CR 613.4c: Omnath, Locus of Mana — "~ gets +1/+1 for each
+    // unspent green mana you have." The per-mana multiplier was dropped (frozen
+    // at +1/+1); now both P/T modifications scale dynamically with the floating
+    // green mana in the controller's pool via `QuantityRef::UnspentMana`.
+    use crate::types::ability::QuantityRef;
+    let def = parse_static_line("~ gets +1/+1 for each unspent green mana you have.")
+        .expect("Omnath dynamic P/T static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::UnspentMana {
+            color: Some(ManaColor::Green),
+        },
+    };
+    let dynamic_power = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected AddDynamicPower");
+    assert_eq!(
+        dynamic_power, &expected,
+        "power scales with unspent green mana"
+    );
+    let dynamic_toughness = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicToughness { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected AddDynamicToughness");
+    assert_eq!(dynamic_toughness, &expected, "toughness scales too");
+}
+
+#[test]
+fn for_each_clause_unspent_mana() {
+    // Building-block: the for-each quantity parser maps "unspent <color> mana
+    // you have" to UnspentMana{color}, and the colorless "unspent mana you have"
+    // to UnspentMana{None} (all colors).
+    use crate::types::ability::QuantityRef;
+    assert_eq!(
+        crate::parser::oracle_quantity::parse_for_each_clause("unspent green mana you have"),
+        Some(QuantityRef::UnspentMana {
+            color: Some(ManaColor::Green),
+        }),
+    );
+    assert_eq!(
+        crate::parser::oracle_quantity::parse_for_each_clause("unspent mana you have"),
+        Some(QuantityRef::UnspentMana { color: None }),
+    );
+}
+
+#[test]
 fn static_self_gets_dynamic_pt_for_each_permanent_you_control_but_dont_own() {
     let def = parse_static_line("~ gets +1/+1 for each land you control but don't own.")
         .expect("control-without-ownership dynamic P/T static must parse");
