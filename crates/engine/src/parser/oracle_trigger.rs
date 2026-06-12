@@ -20682,7 +20682,7 @@ mod tests {
         }
     }
 
-    /// CR 603.7 + CR 608.2k: Razorkin Needlehead — "Whenever an opponent draws a
+    /// CR 603.2 + CR 608.2c: Razorkin Needlehead — "Whenever an opponent draws a
     /// card, this creature deals 1 damage to them." The player-actor trigger
     /// subject ("an opponent") makes "them" the triggering player; with no
     /// explicit player scope, the bare "them" damage recipient must fall back to

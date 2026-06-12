@@ -3,8 +3,9 @@
 //!
 //! Regression for issue #2869: the bare player anaphor "them" was resolved as an
 //! object anaphor (`TriggeringSource`, the source creature) with no player
-//! referent, so the draw trigger fired but dealt 0 damage. Per CR 603.7 the
-//! triggering player ("them") is the opponent who drew; the parser now falls
+//! referent, so the draw trigger fired but dealt 0 damage. Per CR 603.2 and CR
+//! 608.2c, the ordinary draw trigger fires for the opponent's draw and the
+//! effect instructions make "them" the opponent who drew; the parser now falls
 //! back to the player-actor trigger subject ("an opponent") and binds "them" to
 //! `TriggeringPlayer`.
 //!
