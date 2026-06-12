@@ -3,7 +3,7 @@
 //!
 //! Regression for issue #2891: the bare player anaphor "them" was parsed as an
 //! object anaphor (`ParentTarget`) with no referent, so the upkeep trigger fired
-//! and logged but dealt 0 damage to anyone. Per CR 603.2, "them" is the active
+//! and logged but dealt 0 damage to anyone. Per CR 603.2b, "them" is the active
 //! player whose upkeep triggered the ability; the parser now binds it to
 //! `ScopedPlayer`, which the runtime resolves to that player at fire time.
 //!

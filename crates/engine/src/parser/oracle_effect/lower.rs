@@ -5,7 +5,7 @@ use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, veri
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::super::oracle_nom::duration::{parse_duration, parse_for_as_long_as_condition};
 use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -4052,13 +4052,13 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
-    // CR 603.2 + CR 608.2k: A bare player anaphor recipient ("them" / "they")
+    // CR 603.2b + CR 608.2c: A bare player anaphor recipient ("them" / "they")
     // in a player-scoped trigger body ("At the beginning of each player's
-    // upkeep, ~ deals N damage to them") refers to the player the trigger's
-    // scope established — the player whose upkeep it is — exactly like the
-    // "that player" event-context anaphor. The generic pronoun resolver treats
-    // bare "them" as an object anaphor and binds it to `ParentTarget`, which has
-    // no referent here, so the damage hits no one (Roiling Vortex, issue #2891).
+    // upkeep, ~ deals N damage to them") follows the player scope established
+    // by the trigger condition — the player whose upkeep it is. The generic
+    // pronoun resolver treats bare "them" as an object anaphor and binds it to
+    // `ParentTarget`, which has no referent here, so the damage hits no one
+    // (Roiling Vortex, issue #2891).
     if let Some(target) = resolve_player_anaphor_damage_recipient(after_to, ctx) {
         return Some((
             Effect::DealDamage {
@@ -4083,7 +4083,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     ))
 }
 
-/// CR 603.2 + CR 608.2k: Resolve a bare player-anaphor damage recipient
+/// CR 603.2b + CR 608.2c: Resolve a bare player-anaphor damage recipient
 /// ("them" / "they") to the player the trigger's `relative_player_scope`
 /// established, mirroring how the "that player" event-context anaphor resolves.
 ///
@@ -4100,9 +4100,14 @@ fn resolve_player_anaphor_damage_recipient(
 ) -> Option<TargetFilter> {
     let trimmed = after_to.trim().trim_end_matches(['.', ',', ';']).trim();
     let lower = trimmed.to_lowercase();
-    let is_player_anaphor = all_consuming(alt((tag::<_, _, OracleError<'_>>("them"), tag("they"))))
-        .parse(lower.as_str())
-        .is_ok();
+    let is_player_anaphor = nom_parse_lower(&lower, |input| {
+        all_consuming(value(
+            (),
+            alt((tag::<_, _, OracleError<'_>>("them"), tag("they"))),
+        ))
+        .parse(input)
+    })
+    .is_some();
     if !is_player_anaphor {
         return None;
     }

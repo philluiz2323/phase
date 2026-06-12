@@ -20654,7 +20654,7 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
-    /// CR 603.2 + CR 608.2k: Roiling Vortex — "At the beginning of each player's
+    /// CR 603.2b + CR 608.2c: Roiling Vortex — "At the beginning of each player's
     /// upkeep, this enchantment deals 1 damage to them." The bare player anaphor
     /// "them" is the player whose upkeep it is — the same referent "that player"
     /// resolves to in this trigger class (`ScopedPlayer`, which the runtime binds
