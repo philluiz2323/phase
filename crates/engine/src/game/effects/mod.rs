@@ -90,6 +90,7 @@ mod epic_tests;
 pub mod exchange_control;
 // Tests for `intensify` live in a sibling file (declared here, not in
 // `intensify.rs`, so `intensify.rs` stays implementation-only).
+pub mod cloak;
 pub mod exchange_life;
 pub mod exile_from_top_until;
 pub mod exile_top;
@@ -549,6 +550,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_with_counters,
             duration,
             track_exiled_by_source,
+            mut moved_count,
             effect_kind,
         } = pending;
         let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
@@ -574,11 +576,33 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
+            let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
                 state, &ctx, *obj_id, events,
             ) {
-                crate::game::effects::change_zone::ZoneMoveResult::Done => {}
+                crate::game::effects::change_zone::ZoneMoveResult::Done => {
+                    if let Some(count) = moved_count.as_mut() {
+                        if before_zone != Some(ctx.destination)
+                            && state
+                                .objects
+                                .get(obj_id)
+                                .is_some_and(|object| object.zone == ctx.destination)
+                        {
+                            *count += 1;
+                        }
+                    }
+                }
                 crate::game::effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    if let Some(count) = moved_count.as_mut() {
+                        if before_zone != Some(ctx.destination)
+                            && state
+                                .objects
+                                .get(obj_id)
+                                .is_some_and(|object| object.zone == ctx.destination)
+                        {
+                            *count += 1;
+                        }
+                    }
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
                             remaining: remaining[i + 1..].to_vec(),
@@ -593,6 +617,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_with_counters: ctx.enter_with_counters.clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            moved_count,
                             effect_kind,
                         });
                     paused = true;
@@ -613,6 +638,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_with_counters: ctx.enter_with_counters.clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            moved_count,
                             effect_kind,
                         });
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -656,6 +682,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // Devour snapshot. NOT cleared on the `paused` break above (a further
         // devourer's sacrifice and the remaining members still need it).
         let _ = state.devour_eligible_snapshot.take();
+        if let Some(count) = moved_count {
+            state.last_effect_count = Some(count);
+        }
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
@@ -1042,6 +1071,8 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::MultiTargetSelection { .. }
             | WaitingFor::ReplacementChoice { .. }
             | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::UnlessPayment { .. }
+            | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::PairChoice { .. }
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::TributeChoice { .. }
@@ -1267,6 +1298,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::CastTimingPermission { .. }
             | AbilityCondition::ManaColorSpent { .. }
             | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
             | AbilityCondition::SourceEnteredThisTurn
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
@@ -1646,6 +1678,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Seek { count: amount, .. }
         | Effect::SetLifeTotal { amount, .. }
         | Effect::Manifest { count: amount, .. }
+        | Effect::Cloak { count: amount, .. }
         | Effect::GivePlayerCounter { count: amount, .. }
         | Effect::GainEnergy { amount, .. }
         | Effect::Discover {
@@ -1936,6 +1969,7 @@ pub fn resolve_effect(
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
+        Effect::GainControlAll { .. } => gain_control::resolve_all(state, ability, events),
         Effect::Goad { .. } | Effect::GoadAll { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
@@ -1974,6 +2008,7 @@ pub fn resolve_effect(
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),
+        Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)
@@ -2110,6 +2145,7 @@ pub fn resolve_effect(
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
+        Effect::Cloak { .. } => cloak::resolve(state, ability, events),
         Effect::TurnFaceUp { .. } => turn_face_up::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
         Effect::GrantExtraLoyaltyActivations { .. } => {
@@ -2249,6 +2285,16 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    if let Effect::SetTapState {
+        scope: EffectScope::All,
+        target,
+        ..
+    } = effect
+    {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     // `GrantCastingPermission` has a `target` field that is not exposed by
     // `Effect::target_filter()` (it selects objects to grant permission to,
     // not spell/ability targets). Inspect directly so "the rest" / "those
@@ -2348,6 +2394,13 @@ fn affected_objects_from_events(
             .filter_map(|target| match target {
                 TargetRef::Object(id) => Some(*id),
                 TargetRef::Player(_) => None,
+            })
+            .collect(),
+        Effect::GainControlAll { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ControllerChanged { object_id, .. } => Some(*object_id),
+                _ => None,
             })
             .collect(),
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
@@ -2813,6 +2866,61 @@ fn has_member_driven_repeat(ability: &ResolvedAbility) -> bool {
 
 fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &ResolvedAbility) -> bool {
     has_member_driven_repeat(&ability_with_event_context_targets(state, ability))
+}
+
+/// CR 608.2c + CR 609.3: True when a counted repeat loop must wrap scoped
+/// and/or unless-pay instructions (Torment of Hailfire — "Repeat X times.
+/// Each opponent loses 3 life unless …"). The repeat count is the outermost
+/// process; `player_scope` and `unless_pay` resolve inside each iteration.
+fn repeat_for_outermost_with_scope_or_unless(ability: &ResolvedAbility) -> bool {
+    ability.repeat_for.is_some()
+        && !has_kind_driven_repeat(ability)
+        && !has_member_driven_repeat(ability)
+        && (ability.player_scope.is_some() || ability.unless_pay.is_some())
+}
+
+/// CR 609.3: Drive a `repeat_for` loop whose iterations each run the full
+/// `resolve_chain_body` (scoped fan-out + unless-pay + effect) with
+/// `repeat_for` cleared so the inner pass does not re-enter this driver.
+fn drive_repeat_for_outermost(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    let hydrated = hydrate_event_context_targets(state, ability);
+    let effective = hydrated.as_ref();
+    let base_iterations = if let Some(ref qty) = effective.repeat_for {
+        crate::game::quantity::resolve_quantity_with_targets(state, qty, effective).max(0) as usize
+    } else {
+        1
+    };
+
+    let initial_waiting_for = state.waiting_for.clone();
+    let mut iteration = 0usize;
+    while iteration < base_iterations {
+        let mut iter_ability = effective.clone();
+        iter_ability.repeat_for = None;
+        resolve_chain_body(state, &iter_ability, events, depth)?;
+        if state.waiting_for != initial_waiting_for {
+            let next_iteration = iteration + 1;
+            if next_iteration < base_iterations {
+                let mut resume = effective.clone();
+                resume.repeat_for = None;
+                state.pending_repeat_iteration =
+                    Some(crate::types::game_state::PendingRepeatIteration {
+                        ability: Box::new(resume),
+                        tracked_members: Vec::new(),
+                        iterated_counter_kinds: Vec::new(),
+                        next_iteration,
+                        total_iterations: base_iterations,
+                    });
+            }
+            break;
+        }
+        iteration += 1;
+    }
+    Ok(())
 }
 
 fn rebind_iterated_counter_kind(
@@ -3542,6 +3650,12 @@ fn resolve_chain_body(
         Cow::Borrowed(ability)
     };
     let ability = ability.as_ref();
+
+    if repeat_for_outermost_with_scope_or_unless(ability)
+        && !has_member_driven_repeat_after_hydration(state, ability)
+    {
+        return drive_repeat_for_outermost(state, ability, events, depth);
+    }
 
     // CR 608.2: player_scope iteration — when an ability has player_scope set,
     // execute the scoped instruction once per matching player. Runtime keeps
@@ -5285,6 +5399,32 @@ pub(crate) fn evaluate_condition(
             };
             type_matches && subtype_matches && filter_matches
         }
+        // CR 608.2c + CR 201.2: "if it shares a [quality] with [reference]" —
+        // compare two anaphoric object references at resolution time.
+        AbilityCondition::ObjectsShareQuality {
+            subject,
+            reference,
+            quality,
+        } => {
+            let subject_id = crate::game::targeting::resolved_targets(ability, subject, state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                });
+            let reference_id = crate::game::targeting::resolved_targets(ability, reference, state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                });
+            match (subject_id, reference_id) {
+                (Some(left), Some(right)) => {
+                    crate::game::filter::objects_share_quality(state, left, right, quality)
+                }
+                _ => false,
+            }
+        }
         // CR 400.7: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.
         AbilityCondition::SourceEnteredThisTurn => {
@@ -5980,10 +6120,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
-        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        ControllerRef, DelayedTriggerCondition, Duration, EffectScope, FilterProp,
+        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
+        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -9034,6 +9174,93 @@ mod tests {
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
     }
 
+    /// CR 613.1b + CR 608.2c: a mass gain-control effect publishes the objects
+    /// actually gained so a downstream "those creatures" continuation can act on
+    /// that exact set (Call for Aid / Mob Rule class). This exercises both the
+    /// `GainControlAll` publication arm and the `SetTapState(All)` tracked-set
+    /// consumer path; without either, the creatures remain tapped.
+    #[test]
+    fn gain_control_all_publishes_tracked_set_for_those_creatures_tail() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Call for Aid".to_string(),
+            Zone::Stack,
+        );
+
+        let make_tapped_creature = |state: &mut GameState, card_id: u64, name: &str| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.tapped = true;
+            id
+        };
+        let creature_a = make_tapped_creature(&mut state, 2, "Stolen A");
+        let creature_b = make_tapped_creature(&mut state, 3, "Stolen B");
+        let noncreature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Ignored Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&noncreature).unwrap().tapped = true;
+
+        let untap_those_creatures = ResolvedAbility::new(
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let gain_control = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(untap_those_creatures);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &gain_control, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        for id in [creature_a, creature_b] {
+            let obj = state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.controller,
+                PlayerId(0),
+                "gained creature should be controlled by P0"
+            );
+            assert!(
+                !obj.tapped,
+                "gained creature should be untapped by the tracked-set tail"
+            );
+        }
+        assert!(
+            state.objects.get(&noncreature).unwrap().tapped,
+            "non-gained object must not be included in the tracked set"
+        );
+    }
+
     /// CR 701.20b + CR 608.2c: `RevealTop` publishes `CardsRevealed`, not
     /// `ZoneChanged`. Without a dedicated arm in `affected_objects_from_events`,
     /// the tracked-set publish is empty and `ChooseFromZone` falls back to a
@@ -11384,6 +11611,9 @@ mod tests {
                     source_id: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -14010,6 +14240,9 @@ mod tests {
                     source_id: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

@@ -393,6 +393,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
+        TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
@@ -929,6 +930,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeTotal { player } => {
             format!("life total ({})", fmt_player_scope(player))
         }
+        QuantityRef::UnspentMana { color } => match color {
+            Some(c) => format!("unspent {c:?} mana you have"),
+            None => "unspent mana you have".to_string(),
+        },
         QuantityRef::GraveyardSize { player } => {
             format!("cards in graveyard ({})", fmt_player_scope(player))
         }
@@ -1741,6 +1746,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Intensify { .. } => {}
         Effect::TurnFaceUp { .. } => {}
         Effect::DestroyAll { target, .. }
+        // CR 613.1b: mass gain-control reports its population `filter` like the
+        // other mass effects (Hellkite Tyrant — "all artifacts that player controls").
+        | Effect::GainControlAll { target, .. }
         // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
         // population `filter`, like the other mass effects.
         | Effect::SetTapState {
@@ -2556,6 +2564,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantCastingPermission { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }
@@ -2564,6 +2573,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::SwitchPT { .. }
         | Effect::Myriad
         | Effect::Encore
+        | Effect::Meld { .. }
         | Effect::ExileHaunting { .. }
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
@@ -5323,6 +5333,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
+        AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
@@ -5408,6 +5419,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
     match qref {
         QuantityRef::HandSize { .. } => ("HandSize", Handled),
         QuantityRef::LifeTotal { .. } => ("LifeTotal", Handled),
+        QuantityRef::UnspentMana { .. } => ("UnspentMana", Handled),
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
@@ -5593,6 +5605,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
+        StaticCondition::WasCast { .. } => ("WasCast", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
         StaticCondition::SourceIsTapped => ("SourceIsTapped", Handled),
@@ -7457,7 +7470,7 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if it's not your turn")
             || lower.contains("if it's your turn")
             || lower.contains("if no other ")
-            || lower.contains("if no creatures ")
+            || (lower.contains("if no creatures ") && !lower.contains("if no creatures attacked"))
             // Replacement effect patterns (not ability conditions):
             // "if X would Y, Z instead" is the canonical CR 614.1a replacement structure.
             || (lower.contains(" would ") && lower.contains(" instead"))

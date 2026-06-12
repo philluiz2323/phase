@@ -208,6 +208,28 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             | CastingPermission::Foretold { .. } => true,
         });
     }
+    // CR 601.2a + CR 603.7 + CR 611.2a: Garbage-collect single-use consumed
+    // markers whose grant has expired. After the prune above, drop any consumed
+    // tracked-set entry that no longer has a live single-use `PlayFromExile`
+    // grant in exile, so the set does not grow without bound.
+    let live_single_use_groups: std::collections::HashSet<crate::types::identifiers::TrackedSetId> =
+        state
+            .objects
+            .values()
+            .flat_map(|obj| {
+                obj.casting_permissions.iter().filter_map(|p| match p {
+                    CastingPermission::PlayFromExile {
+                        single_use_group,
+                        single_use: true,
+                        ..
+                    } => *single_use_group,
+                    _ => None,
+                })
+            })
+            .collect();
+    state
+        .exile_play_single_use_consumed
+        .retain(|group| live_single_use_groups.contains(group));
 }
 
 /// CR 514.2: Remove durational casting permissions granted to
@@ -605,6 +627,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
@@ -720,6 +743,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
@@ -899,6 +923,12 @@ fn evaluate_condition_with_context(
         }
         // CR 400.7: True when the source permanent entered the battlefield this turn.
         StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
+        // CR 601.2 + CR 611.3a: True when the source permanent was cast.
+        StaticCondition::WasCast { zone } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.cast_from_zone)
+            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
         StaticCondition::IsRingBearer => {
             super::effects::ring::is_current_ring_bearer(state, controller, source_id)
@@ -9142,6 +9172,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -9166,6 +9199,9 @@ mod tests {
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         });
         perms.push(CastingPermission::PlayFromExile {
             duration: Duration::Permanent,
@@ -9174,6 +9210,9 @@ mod tests {
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         });
         perms.push(CastingPermission::AdventureCreature);
 
@@ -9210,6 +9249,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
@@ -9295,6 +9337,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
         state
             .objects
@@ -9310,6 +9355,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         // Active player is P0 — only P0's permission should expire.
@@ -9342,6 +9390,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
