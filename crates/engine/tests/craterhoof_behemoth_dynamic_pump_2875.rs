@@ -12,45 +12,26 @@
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::layers::evaluate_layers;
-use engine::game::scenario::{GameScenario, P0};
-use engine::game::zones::create_object;
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::AbilityKind;
-use engine::types::card_type::CoreType;
-use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
 
-const ORACLE: &str = "creatures you control get +X/+X until end of turn, where X is the number of creatures you control";
+const ORACLE: &str = "creatures you control gain trample and get +X/+X until end of turn, where X is the number of creatures you control";
 
 #[test]
 fn craterhoof_pump_scales_with_creatures_you_control() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(scenario.add_creature(P0, &format!("Beast {i}"), 2, 2).id());
+    }
+    let opponent_creature = scenario.add_creature(P1, "Opponent Beast", 2, 2).id();
     let mut runner = scenario.build();
 
-    // P0 controls three 2/2 creatures, so X = 3 and each ends as a 5/5.
-    let mut ids = Vec::new();
-    for i in 0..3u64 {
-        let id = create_object(
-            runner.state_mut(),
-            CardId(10 + i),
-            P0,
-            format!("Beast {i}"),
-            Zone::Battlefield,
-        );
-        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.power = Some(2);
-        obj.toughness = Some(2);
-        obj.base_power = Some(2);
-        obj.base_toughness = Some(2);
-        obj.base_card_types = obj.card_types.clone();
-        ids.push(id);
-    }
-
-    // Resolve the dynamic pump controlled by P0 (X is locked to the count of
-    // creatures P0 controls = 3).
+    // P0 controls three creatures, so X = 3. The P1 creature proves the count
+    // and affected filter stay scoped to the source controller.
     let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
     let ability = build_resolved_from_def(&def, ids[0], P0);
     let mut events = Vec::new();
@@ -69,4 +50,8 @@ fn craterhoof_pump_scales_with_creatures_you_control() {
         );
         assert_eq!(obj.toughness, Some(5));
     }
+
+    let obj = &runner.state().objects[&opponent_creature];
+    assert_eq!(obj.power, Some(2));
+    assert_eq!(obj.toughness, Some(2));
 }

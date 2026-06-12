@@ -24,9 +24,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
@@ -4932,18 +4932,17 @@ pub(super) fn apply_where_x_effect_expression(
 /// `CostXPaid` / bare `Variable("X")` value, so a modification whose quantity is
 /// already a concrete reference is left unchanged.
 fn apply_where_x_continuous_modification(
-    modification: &mut crate::types::ability::ContinuousModification,
+    modification: &mut ContinuousModification,
     where_x_expression: Option<&str>,
 ) {
-    use crate::types::ability::ContinuousModification as Cm;
     match modification {
-        Cm::SetDynamicPower { value, .. }
-        | Cm::SetDynamicToughness { value, .. }
-        | Cm::SetPowerDynamic { value, .. }
-        | Cm::SetToughnessDynamic { value, .. }
-        | Cm::AddDynamicPower { value, .. }
-        | Cm::AddDynamicToughness { value, .. }
-        | Cm::AddDynamicKeyword { value, .. } => {
+        ContinuousModification::SetDynamicPower { value, .. }
+        | ContinuousModification::SetDynamicToughness { value, .. }
+        | ContinuousModification::SetPowerDynamic { value, .. }
+        | ContinuousModification::SetToughnessDynamic { value, .. }
+        | ContinuousModification::AddDynamicPower { value, .. }
+        | ContinuousModification::AddDynamicToughness { value, .. }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
             *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
         }
         _ => {}
