@@ -8599,14 +8599,19 @@ mod tests {
             "ability 2 cost: {:?}",
             r.abilities[2].cost
         );
-        assert!(
-            matches!(
-                &*r.abilities[2].effect,
-                Effect::ChangeZoneAll { .. } | Effect::BounceAll { .. }
-            ),
-            "the -6 effect must be a mass return, got {:?}",
-            r.abilities[2].effect
-        );
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            ..
+        } = &*r.abilities[2].effect
+        else {
+            panic!(
+                "the -6 effect must be a graveyard-to-battlefield mass return, got {:?}",
+                r.abilities[2].effect
+            );
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Battlefield);
     }
 
     #[test]

@@ -597,6 +597,7 @@ pub fn resolve(
                         enter_with_counters: ctx.enter_with_counters.clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        moved_count: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -621,6 +622,7 @@ pub fn resolve(
                         enter_with_counters: ctx.enter_with_counters.clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        moved_count: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -1042,6 +1044,7 @@ pub fn resolve_all(
                         enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        moved_count: Some(moved_count),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 crate::game::replacement::park_waiting_for(state, player);
@@ -1075,6 +1078,7 @@ pub fn resolve_all(
                         enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        moved_count: Some(moved_count + 1),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -1948,6 +1952,11 @@ mod tests {
             );
         }
         assert!(state.pending_change_zone_iteration.is_none());
+        assert_eq!(
+            state.last_effect_count,
+            Some(4),
+            "paused ChangeZoneAll must preserve the moved-object count for chained 'that many' effects"
+        );
     }
 
     #[test]
