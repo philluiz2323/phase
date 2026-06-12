@@ -2492,7 +2492,23 @@ pub(crate) fn gather_transient_continuous_effects(
 
         // CR 611.2b: ForAsLongAs durations embed a condition that must hold each layer cycle.
         if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+            // CR 611.2b: A recipient-referential condition ("for as long as IT
+            // has a shield counter" — Shield Broker's gain-control) refers to
+            // the object the effect applies to, not the source. For a
+            // single-object effect that object is the affected `SpecificObject`;
+            // evaluate against it so the duration tracks the controlled/granted
+            // creature's counters rather than the (counter-less) source.
+            let holds = match (&tce.affected, condition_uses_recipient_context(condition)) {
+                (TargetFilter::SpecificObject { id }, true) => evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    tce.controller,
+                    tce.source_id,
+                    *id,
+                ),
+                _ => evaluate_condition(state, condition, tce.controller, tce.source_id),
+            };
+            if !holds {
                 continue;
             }
         }
@@ -2750,8 +2766,21 @@ fn collect_transient_combat_assignment_rule_effects(
             continue;
         }
 
+        // CR 611.2b: see the sibling collection pass above — a recipient
+        // ("for as long as it has a counter") condition evaluates against the
+        // affected `SpecificObject`, not the source.
         if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+            let holds = match (&tce.affected, condition_uses_recipient_context(condition)) {
+                (TargetFilter::SpecificObject { id }, true) => evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    tce.controller,
+                    tce.source_id,
+                    *id,
+                ),
+                _ => evaluate_condition(state, condition, tce.controller, tce.source_id),
+            };
+            if !holds {
                 continue;
             }
         }

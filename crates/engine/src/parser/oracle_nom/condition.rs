@@ -1124,7 +1124,7 @@ fn parse_source_enchanted_by_aura_count(input: &str) -> OracleResult<'_, StaticC
 /// single `alt()` so new variants add one arm rather than enumerating
 /// permutations.
 pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = parse_counter_condition_subject(input)?;
+    let (rest, is_recipient) = parse_counter_condition_subject(input)?;
     let (rest, _) = tag("has ").parse(rest)?;
 
     // Quantity axis: produces (minimum, maximum).
@@ -1144,14 +1144,28 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
 
     let (rest, _) = tag(" on it").parse(rest)?;
 
-    Ok((
-        rest,
+    // CR 122.1 + CR 611.2b: "it has a counter" refers to the object the effect
+    // applies to (the *recipient*) — e.g. "gain control of that creature for as
+    // long as it has a shield counter" (Shield Broker), where "it" is the
+    // controlled creature, not the source. A source-referential subject ("~" /
+    // "this creature", Demon Wall) keeps `HasCounters`. The recipient variant is
+    // evaluated against the affected object by the layer system
+    // (`evaluate_condition_with_recipient`).
+    let condition = if is_recipient {
+        StaticCondition::RecipientHasCounters {
+            counters,
+            minimum,
+            maximum,
+        }
+    } else {
         StaticCondition::HasCounters {
             counters,
             minimum,
             maximum,
-        },
-    ))
+        }
+    };
+
+    Ok((rest, condition))
 }
 
 /// Subject axis for counter-has conditions. Accepts the canonical
@@ -1161,8 +1175,17 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
 /// tapped/combat predicate family (which already uses `"it"` as part of
 /// longer phrases) — scoping the pronoun branch to this combinator avoids
 /// that coupling.
-fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, &str> {
-    alt((parse_source_subject, tag("it "))).parse(input)
+fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, bool> {
+    alt((
+        // "~" / "this creature" — the source permanent carrying the static
+        // (Demon Wall). `false` = source-referential.
+        value(false, parse_source_subject),
+        // The bound pronoun "it" — the recipient/affected object, e.g. the
+        // creature controlled "for as long as it has a counter". `true` =
+        // recipient-referential.
+        value(true, tag("it ")),
+    ))
+    .parse(input)
 }
 
 /// Quantity axis for `parse_source_has_counters`.
@@ -10476,7 +10499,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::Any,
                 minimum: 1,
                 maximum: None,
@@ -10493,7 +10516,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                 minimum: 1,
                 maximum: None,
@@ -10538,7 +10561,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                 minimum: 10,
                 maximum: None,
@@ -10599,7 +10622,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
                 minimum: 3,
                 maximum: None,
@@ -10616,7 +10639,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Generic("flood".to_string())),
                 minimum: 1,
                 maximum: None,
@@ -10632,7 +10655,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                 minimum: 2,
                 maximum: Some(2),
@@ -10648,7 +10671,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                 minimum: 0,
                 maximum: Some(2),
@@ -10663,7 +10686,7 @@ mod tests {
         assert_eq!(rest, "");
         assert_eq!(
             c,
-            StaticCondition::HasCounters {
+            StaticCondition::RecipientHasCounters {
                 counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                 minimum: 0,
                 maximum: Some(0),
