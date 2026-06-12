@@ -1460,10 +1460,18 @@ fn filter_inner_for_object(
         // therefore matches no objects, which is the correct fallback when no
         // tracked set is available.
         TargetFilter::TrackedSetFiltered { id, filter } => {
-            let in_set = state
-                .tracked_object_sets
-                .get(id)
-                .is_some_and(|set| set.contains(&object_id));
+            let in_set = if id.0 == 0 {
+                state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(tracked_id, _)| tracked_id.0)
+                    .is_some_and(|(_, set)| set.contains(&object_id))
+            } else {
+                state
+                    .tracked_object_sets
+                    .get(id)
+                    .is_some_and(|set| set.contains(&object_id))
+            };
             in_set
                 && filter_inner_for_object(
                     state,

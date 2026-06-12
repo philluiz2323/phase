@@ -514,6 +514,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             }
         }
         GameEvent::LifeChanged { .. } => push(TriggerEventKey::LifeChanged),
+        GameEvent::ControllerChanged { .. } => push(TriggerEventKey::ChangesController),
         GameEvent::ManaAdded { .. } => push(TriggerEventKey::ManaProduced),
         GameEvent::TappedForMana { .. } => {
             push(TriggerEventKey::ManaProduced);

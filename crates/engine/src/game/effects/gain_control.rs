@@ -95,6 +95,7 @@ pub fn resolve_all(
         .collect();
 
     for obj_id in matching {
+        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
         // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
         state.add_transient_continuous_effect(
             ability.source_id,
@@ -105,6 +106,13 @@ pub fn resolve_all(
             None,
         );
         mark_echo_due_for_new_controller(state, obj_id);
+        if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller,
+                new_controller,
+            });
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -323,7 +331,7 @@ mod tests {
         )
     }
 
-    /// CR 613.3: Hellkite Tyrant — "gain control of all artifacts that player
+    /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
     /// controls". The mass `GainControlAll` enumerates the battlefield, binds
     /// `controller: TargetPlayer` to the effect's player target (the player
     /// dealt combat damage), takes control of EVERY matching artifact, and

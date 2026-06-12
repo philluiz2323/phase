@@ -1505,7 +1505,7 @@ pub(super) fn parse_targeted_action_ast(
                 grant_extra_turn_after,
             });
         }
-        // CR 613.3: "gain control of all/each <filter>" is the untargeted mass
+        // CR 613.1b: "gain control of all/each <filter>" is the untargeted mass
         // form (Hellkite Tyrant) — mirrors "destroy all". Detect the mass
         // pluralizer; `parse_target_with_ctx` still consumes the "all "/"each "
         // prefix into the population filter, so only the flag is threaded.
@@ -9089,7 +9089,7 @@ mod tests {
         let _ = (text, lower);
     }
 
-    /// CR 613.3: Hellkite Tyrant — "gain control of all artifacts that player
+    /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
     /// controls" is the untargeted MASS form, lowered to `GainControlAll`
     /// (mirrors "destroy all" → `DestroyAll`). The "target" single form must
     /// stay `GainControl`. The mass population filter still carries the type +

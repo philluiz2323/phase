@@ -7835,7 +7835,7 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
     {
-        // CR 613.3: untargeted mass form "gain control of all/each <filter>"
+        // CR 613.1b: untargeted mass form "gain control of all/each <filter>"
         // (Hellkite Tyrant) lowers to `Effect::GainControlAll`.
         let rest_lower = rest.to_ascii_lowercase();
         let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
@@ -44669,7 +44669,7 @@ mod tests {
         // Should have player_scope: All for "Each player"
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
 
-        // CR 613.3: "gain control of ALL creatures they own" is the untargeted
+        // CR 613.1b: "gain control of ALL creatures they own" is the untargeted
         // mass form → `GainControlAll`. Under the `player_scope: All` fanout
         // (effects/mod.rs sets `ability.controller = scoped_player` per player),
         // each player gains control of the creatures matching the ScopedPlayer
