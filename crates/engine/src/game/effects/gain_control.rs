@@ -407,6 +407,21 @@ mod tests {
             PlayerId(0),
             "control of the target must transfer to Shield Broker's controller while it has a shield counter"
         );
+
+        state
+            .objects
+            .get_mut(&target)
+            .expect("target remains on battlefield")
+            .counters
+            .remove(&CounterType::Shield);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&target].controller,
+            PlayerId(1),
+            "control must revert when the recipient no longer has a shield counter"
+        );
     }
 
     /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player

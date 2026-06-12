@@ -1124,7 +1124,7 @@ fn parse_source_enchanted_by_aura_count(input: &str) -> OracleResult<'_, StaticC
 /// single `alt()` so new variants add one arm rather than enumerating
 /// permutations.
 pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, is_recipient) = parse_counter_condition_subject(input)?;
+    let (rest, subject) = parse_counter_condition_subject(input)?;
     let (rest, _) = tag("has ").parse(rest)?;
 
     // Quantity axis: produces (minimum, maximum).
@@ -1151,18 +1151,17 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
     // "this creature", Demon Wall) keeps `HasCounters`. The recipient variant is
     // evaluated against the affected object by the layer system
     // (`evaluate_condition_with_recipient`).
-    let condition = if is_recipient {
-        StaticCondition::RecipientHasCounters {
+    let condition = match subject {
+        CounterConditionSubject::Recipient => StaticCondition::RecipientHasCounters {
             counters,
             minimum,
             maximum,
-        }
-    } else {
-        StaticCondition::HasCounters {
+        },
+        CounterConditionSubject::Source => StaticCondition::HasCounters {
             counters,
             minimum,
             maximum,
-        }
+        },
     };
 
     Ok((rest, condition))
@@ -1175,15 +1174,20 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
 /// tapped/combat predicate family (which already uses `"it"` as part of
 /// longer phrases) — scoping the pronoun branch to this combinator avoids
 /// that coupling.
-fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, bool> {
+#[derive(Clone, Copy)]
+enum CounterConditionSubject {
+    Source,
+    Recipient,
+}
+
+fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, CounterConditionSubject> {
     alt((
         // "~" / "this creature" — the source permanent carrying the static
-        // (Demon Wall). `false` = source-referential.
-        value(false, parse_source_subject),
+        // (Demon Wall).
+        value(CounterConditionSubject::Source, parse_source_subject),
         // The bound pronoun "it" — the recipient/affected object, e.g. the
-        // creature controlled "for as long as it has a counter". `true` =
-        // recipient-referential.
-        value(true, tag("it ")),
+        // creature controlled "for as long as it has a counter".
+        value(CounterConditionSubject::Recipient, tag("it ")),
     ))
     .parse(input)
 }
