@@ -32,7 +32,8 @@
 //!     real declare-attackers ledger.
 //!   - CR 603.4: the intervening "if" is checked when the trigger would fire and
 //!     again on resolution; if false at either point the ability does nothing.
-//!   - CR 510.1c / CR 120.1: combat damage is dealt during the combat damage
+//!   - CR 510.1b / CR 510.2 / CR 120.1: combat damage is assigned to the
+//!     unblocked attacker's defending player, then dealt during the combat damage
 //!     step and reduces the recipient's life.
 //!   - CR 615.1: a prevention shield replaces the would-be damage with nothing.
 
