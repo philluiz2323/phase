@@ -1682,6 +1682,7 @@ fn zone_change_record_from_spec(
         subtypes: ch.subtypes.clone(),
         supertypes: ch.supertypes.clone(),
         keywords: ch.keywords.clone(),
+        trigger_definitions: Vec::new(),
         power: ch.power,
         toughness: ch.toughness,
         base_power: ch.power,
@@ -2993,6 +2994,8 @@ mod tests {
                     granted_to: None,
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
         }
 
