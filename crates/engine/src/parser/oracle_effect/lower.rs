@@ -4052,6 +4052,24 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    // CR 603.2 + CR 608.2k: A bare player anaphor recipient ("them" / "they")
+    // in a player-scoped trigger body ("At the beginning of each player's
+    // upkeep, ~ deals N damage to them") refers to the player the trigger's
+    // scope established — the player whose upkeep it is — exactly like the
+    // "that player" event-context anaphor. The generic pronoun resolver treats
+    // bare "them" as an object anaphor and binds it to `ParentTarget`, which has
+    // no referent here, so the damage hits no one (Roiling Vortex, issue #2891).
+    if let Some(target) = resolve_player_anaphor_damage_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source: None,
+            },
+            "",
+        ));
+    }
+
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
     let rem = trim_dangling_target_word(rem);
@@ -4063,6 +4081,39 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         },
         rem,
     ))
+}
+
+/// CR 603.2 + CR 608.2k: Resolve a bare player-anaphor damage recipient
+/// ("them" / "they") to the player the trigger's `relative_player_scope`
+/// established, mirroring how the "that player" event-context anaphor resolves.
+///
+/// Returns `None` for any recipient that is not the bare anaphor, and for
+/// contexts with no player scope — so the caller's generic target parse (and
+/// the object "them" → `ParentTarget` anaphor used by, e.g., "destroy them")
+/// is left untouched. The scope mapping matches `that_player_library_filter`:
+/// `ScopedPlayer` (per-player phase triggers) stays `ScopedPlayer`; the
+/// triggering-event and target-player scopes resolve to `TriggeringPlayer`;
+/// attack triggers resolve to the `DefendingPlayer`.
+fn resolve_player_anaphor_damage_recipient(
+    after_to: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let trimmed = after_to.trim().trim_end_matches(['.', ',', ';']).trim();
+    let lower = trimmed.to_lowercase();
+    let is_player_anaphor = all_consuming(alt((tag::<_, _, OracleError<'_>>("them"), tag("they"))))
+        .parse(lower.as_str())
+        .is_ok();
+    if !is_player_anaphor {
+        return None;
+    }
+    match ctx.relative_player_scope {
+        Some(ControllerRef::ScopedPlayer) => Some(TargetFilter::ScopedPlayer),
+        Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {
+            Some(TargetFilter::TriggeringPlayer)
+        }
+        Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
+        _ => None,
+    }
 }
 
 /// CR 607.2d + CR 608.2c + CR 120.1: In damage-recipient grammar, singular
