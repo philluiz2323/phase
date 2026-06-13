@@ -263,6 +263,10 @@ pub(crate) fn matches_player_scope(
                     // CR 104.5 / CR 800.4: Players who lost have left the game;
                     // this filter is quantity-only and has no live effect recipient.
                     PlayerFilter::HasLostTheGame => false,
+                    // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard's
+                    // intervening-if); it has no live effect-recipient meaning, so
+                    // no player ever matches it as an effect target.
+                    PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
                     // who was dealt combat damage this turn, optionally
                     // restricted to a matching source.
@@ -595,6 +599,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             duration,
             track_exiled_by_source,
             mut moved_count,
+            face_down_profile,
             effect_kind,
         } = pending;
         let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
@@ -609,6 +614,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_with_counters,
             duration,
             track_exiled_by_source,
+            // CR 708.2a + CR 708.3: thread the preserved face-down profile back
+            // into the resume ctx so a face-down move that parked on a
+            // per-permanent replacement-ordering / as-enters choice resumes
+            // FACE DOWN with the same characteristics (Yedora-style return),
+            // instead of exposing the real object face up. Mirrors the
+            // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
+            face_down_profile,
         };
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in THIS resume can be stamped as a co-departed group and
@@ -662,6 +674,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             moved_count,
+                            // CR 708.2a + CR 708.3: preserve the face-down profile
+                            // across a further pause so resumed members stay face down.
+                            face_down_profile: ctx.face_down_profile.clone(),
                             effect_kind,
                         });
                     paused = true;
@@ -683,6 +698,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             moved_count,
+                            // CR 708.2a + CR 708.3: preserve the face-down profile
+                            // across a further pause so resumed members stay face down.
+                            face_down_profile: ctx.face_down_profile.clone(),
                             effect_kind,
                         });
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -2501,6 +2519,11 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    if let Effect::GoadAll { target } = effect {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     if let Effect::SetTapState {
         scope: EffectScope::All,
         target,
@@ -2533,11 +2556,18 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         static_abilities, ..
     } = effect
     {
+        // CR 608.2c + CR 613: A continuous grant whose `affected` filter either
+        // names the tracked set directly (`TrackedSet`) or is the `ParentTarget`
+        // anaphor ("They gain trample…", Najeela — issue #2898) consumes the
+        // chain's tracked object set. `ParentTarget` with no inherited targets
+        // resolves against `chain_tracked_set_id` in `effect.rs`, so the parent
+        // instruction (e.g. `Untap all attacking creatures`) must publish that
+        // set for the grant to bind to the affected permanents.
         if static_abilities.iter().any(|static_def| {
-            static_def
-                .affected
-                .as_ref()
-                .is_some_and(filter_references_tracked_set)
+            static_def.affected.as_ref().is_some_and(|affected| {
+                filter_references_tracked_set(affected)
+                    || matches!(affected, TargetFilter::ParentTarget)
+            })
         }) {
             return true;
         }
@@ -2643,14 +2673,15 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
-        // CR 701.26a + CR 608.2c: single-target tap/untap publishes the tapped
-        // set for downstream "each of those <type>" continuations (Urge to Feed
-        // class). The mass (`All`) scope is not a target source — it falls
-        // through to the default arm, matching the legacy `TapAll`/`UntapAll`.
-        Effect::SetTapState {
-            scope: EffectScope::Single,
-            ..
-        } => {
+        // CR 701.26a/b + CR 608.2c: tap/untap publishes the affected set for
+        // downstream continuations that bind to "those creatures" / "they".
+        // Single-target tap/untap feeds "each of those <type>" riders (Urge to
+        // Feed class). Mass (`All`) tap/untap feeds `affected: ParentTarget`
+        // keyword grants chained on the same instruction — Najeela's "Untap all
+        // attacking creatures. They gain trample, lifelink, and haste"
+        // (issue #2898). Both scopes read the same tap/untap events, so the
+        // untapped permanents become the chain's tracked set.
+        Effect::SetTapState { .. } => {
             let from_events: Vec<ObjectId> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -5503,15 +5534,31 @@ pub(crate) fn evaluate_condition(
         // resolved-ability context for ETB triggers).
         AbilityCondition::AdditionalCostPaid {
             source,
+            origin,
+            origin_ordinal,
             variant,
             kicker_cost,
             min_count,
-        } => ability.context.additional_cost_paid_matches(
-            *source,
-            *variant,
-            kicker_cost.as_ref(),
-            *min_count,
-        ),
+        } => {
+            if let Some(origin) = origin {
+                let count = origin_ordinal.map_or_else(
+                    || ability.context.instance_payment_count(*origin),
+                    |ordinal| {
+                        ability
+                            .context
+                            .instance_payment_count_for_ordinal(*origin, ordinal)
+                    },
+                );
+                count >= (*min_count).max(1)
+            } else {
+                ability.context.additional_cost_paid_matches(
+                    *source,
+                    *variant,
+                    kicker_cost.as_ref(),
+                    *min_count,
+                )
+            }
+        }
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::OptionalEffectPerformed,
@@ -6031,6 +6078,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::TriggeringPlayer
         | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ControlsCount { .. }
@@ -7096,6 +7144,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 
@@ -9550,6 +9599,70 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 701.15a + CR 122.1: when a counter instruction is
+    /// followed by "goad each creature that had counters put on it this way",
+    /// the countered objects publish as the tracked set consumed by GoadAll.
+    #[test]
+    fn put_counter_publishes_tracked_set_for_goad_all_tail() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Agitator Ant".to_string(),
+            Zone::Battlefield,
+        );
+        let countered = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Countered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [countered, other] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let goad_countered_this_way = ResolvedAbility::new(
+            Effect::GoadAll {
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let put_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(countered)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(goad_countered_this_way);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &put_counter, &mut events, 0).unwrap();
+
+        assert!(state.objects[&countered].goaded_by.contains(&PlayerId(0)));
+        assert!(
+            !state.objects[&other].goaded_by.contains(&PlayerId(0)),
+            "only the creature that received counters this way should be goaded"
+        );
+    }
+
     /// CR 701.20b + CR 608.2c: `RevealTop` publishes `CardsRevealed`, not
     /// `ZoneChanged`. Without a dedicated arm in `affected_objects_from_events`,
     /// the tracked-set publish is empty and `ChooseFromZone` falls back to a
@@ -11101,6 +11214,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
         state.pending_continuation =
@@ -11136,6 +11250,7 @@ mod tests {
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_profile: None,
                 count_param: 0,
             },
             GameAction::SelectCards {

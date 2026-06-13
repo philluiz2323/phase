@@ -2238,6 +2238,25 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
     }
 
+    // CR 608.2c + CR 122.1: "that had counters put on it this way" — relative-
+    // clause linkage to objects that received counters from the preceding
+    // instruction in the same ability (Agitator Ant: "Goad each creature that
+    // had counters put on it this way"). The resolver publishes the affected
+    // set when counters are placed; `TrackedSetFiltered` intersects it with the
+    // type filter.
+    let mut counters_put_this_way = false;
+    let remaining_counters = lower[pos..].trim_start();
+    let counters_offset = lower[pos..].len() - remaining_counters.len();
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that had counters put on it this way"),
+        tag::<_, _, OracleError<'_>>("that had a counter put on it this way"),
+    ))
+    .parse(remaining_counters)
+    {
+        counters_put_this_way = true;
+        pos += counters_offset + (remaining_counters.len() - rest.len());
+    }
+
     // CR 608.2d: "of their choice" / "of his or her choice" — informational qualifier
     // on opponent-choice effects. The actual choice is handled by the WaitingFor state machine.
     let remaining_choice = lower[pos..].trim_start();
@@ -2392,6 +2411,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let filter = if exiled_by_source {
         TargetFilter::And {
             filters: vec![filter, TargetFilter::ExiledBySource],
+        }
+    } else {
+        filter
+    };
+
+    let filter = if counters_put_this_way {
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(filter),
         }
     } else {
         filter
@@ -2560,6 +2588,7 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_has_meaningful_content)
         }
@@ -8014,6 +8043,34 @@ mod tests {
         let (f, rest) = parse_target("cards they own exiled with it");
         assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_type_phrase_creature_that_had_counters_put_on_it_this_way() {
+        let (f, rest) = parse_type_phrase("creature that had counters put on it this way");
+        assert_eq!(rest, "", "remainder was {rest:?}");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }
+        );
+    }
+
+    /// Issue #2903 — Agitator Ant: goad only creatures that received counters
+    /// from the preceding instruction in the same ability.
+    #[test]
+    fn creature_that_had_counters_put_on_it_this_way_is_tracked_set_filtered() {
+        let (f, rest) = parse_target("creature that had counters put on it this way");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }
+        );
     }
 
     /// Issue #547 — Espers to Magicite: "choose up to one target creature card

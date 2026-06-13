@@ -495,6 +495,8 @@ fn parse_modal_additional_cost_condition(
             rest,
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Any,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,
@@ -514,6 +516,8 @@ fn parse_modal_additional_cost_condition(
         value(
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 2,
@@ -527,6 +531,8 @@ fn parse_modal_additional_cost_condition(
             ),
             |min_count| ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count,
@@ -534,6 +540,8 @@ fn parse_modal_additional_cost_condition(
         ),
         success(ModalSelectionCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -555,6 +563,8 @@ fn parse_modal_specific_kicker_cost_condition(
         rest,
         ModalSelectionCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: Some(kicker_cost),
             min_count: 1,
@@ -697,8 +707,9 @@ pub(crate) fn lower_oracle_block(
                         &cost_text,
                         AbilityKind::Spell,
                     );
-                    // CR 609.3: "you may" makes the cost itself optional; the
-                    // controller is prompted before paying.
+                    // CR 118.12 + CR 701.21: "you may sacrifice" makes the
+                    // sacrifice cost optional during resolution; the controller
+                    // is prompted before paying it.
                     cost_ability.optional = true;
                     cost_ability.sub_ability = Some(Box::new(modal_ability));
                     Box::new(cost_ability)
