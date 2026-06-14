@@ -3091,7 +3091,11 @@ mod tests {
     /// in (the first resolution prompt). Helper for the "any player may"
     /// group-bargain tests that must drive the per-player APNAP prompt loop by
     /// hand.
-    fn cast_free_sorcery_to_prompt(runner: &mut GameRunner, spell: ObjectId) -> WaitingFor {
+    fn cast_free_sorcery_to_prompt(
+        runner: &mut GameRunner,
+        spell: ObjectId,
+        preferred_target: Option<TargetRef>,
+    ) -> WaitingFor {
         let card_id = runner.state.objects[&spell].card_id;
         runner
             .act(GameAction::CastSpell {
@@ -3106,8 +3110,16 @@ mod tests {
         for _ in 0..16 {
             match runner.state.waiting_for.clone() {
                 WaitingFor::TargetSelection { target_slots, .. } => {
-                    // Pick the first legal target for the slot.
-                    let target = target_slots[0].legal_targets[0].clone();
+                    let slot = &target_slots[0];
+                    let target = preferred_target
+                        .as_ref()
+                        .and_then(|preferred| {
+                            slot.legal_targets
+                                .iter()
+                                .find(|candidate| *candidate == preferred)
+                                .cloned()
+                        })
+                        .unwrap_or_else(|| slot.legal_targets[0].clone());
                     runner
                         .act(GameAction::ChooseTarget {
                             target: Some(target),
@@ -3156,7 +3168,7 @@ mod tests {
         scenario.with_library_top(P0, &["Reward Card"]);
         let mut runner = scenario.build();
 
-        let wf = cast_free_sorcery_to_prompt(&mut runner, spell);
+        let wf = cast_free_sorcery_to_prompt(&mut runner, spell, None);
 
         // CR 101.4: the controller (active player P0) is offered FIRST, and the
         // other player remains queued.
@@ -3243,6 +3255,73 @@ mod tests {
         );
     }
 
+    /// CR 608.2d + CR 701.21a: choosing to perform an impossible optional
+    /// sacrifice is not "a player does". If the current promptee controls no
+    /// legal permanent, the APNAP offer must continue to the next player rather
+    /// than treating the empty selection as an accepted sacrifice.
+    #[test]
+    fn any_player_may_impossible_sacrifice_accept_continues_offer() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let _p1_land = scenario.add_basic_land(P1, ManaColor::White);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Group Bargain No Land Test",
+                false,
+                "any player may sacrifice a land of their choice. \
+                 if a player does, you draw a card",
+            )
+            .id();
+        scenario.with_library_top(P0, &["Reward Card"]);
+        let mut runner = scenario.build();
+
+        let wf = cast_free_sorcery_to_prompt(&mut runner, spell, None);
+        match wf {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(player, P0, "controller is still offered first");
+                assert_eq!(remaining, vec![P1], "opponent remains queued");
+            }
+            other => panic!("expected first OpponentMayChoice, got {other:?}"),
+        }
+
+        let hand_before = runner
+            .state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("empty sacrifice accept should advance to next player");
+
+        match &runner.state.waiting_for {
+            WaitingFor::OpponentMayChoice { player, .. } => {
+                assert_eq!(
+                    *player, P1,
+                    "empty accept must not end the offer or fire the if-a-player-does rider"
+                );
+            }
+            other => panic!("expected opponent offer after impossible accept, got {other:?}"),
+        }
+        let hand_after = runner
+            .state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+        assert_eq!(
+            hand_after, hand_before,
+            "no card should be drawn because no sacrifice happened"
+        );
+    }
+
     /// CR 608.2d + CR 101.4 (issue #3236): Browbeat-class — when ALL players
     /// (including the controller) decline "any player may have ~ deal 5 damage
     /// to them", the "if no one does" reward fires.
@@ -3260,14 +3339,14 @@ mod tests {
                 "Browbeat Test",
                 false,
                 "any player may have ~ deal 5 damage to them. \
-                 if no one does, you draw three cards",
+                 if no one does, target player draws three cards",
             )
             .id();
-        // Library to draw from for the reward.
-        scenario.with_library_top(P0, &["A", "B", "C", "D"]);
+        // Library to draw from for the chosen reward target.
+        scenario.with_library_top(P1, &["A", "B", "C", "D"]);
         let mut runner = scenario.build();
 
-        let wf = cast_free_sorcery_to_prompt(&mut runner, spell);
+        let wf = cast_free_sorcery_to_prompt(&mut runner, spell, Some(TargetRef::Player(P1)));
 
         // Controller (P0) offered first.
         match wf {
@@ -3284,7 +3363,7 @@ mod tests {
             .state
             .players
             .iter()
-            .find(|p| p.id == P0)
+            .find(|p| p.id == P1)
             .unwrap()
             .hand
             .len();
@@ -3321,7 +3400,7 @@ mod tests {
             .state
             .players
             .iter()
-            .find(|p| p.id == P0)
+            .find(|p| p.id == P1)
             .unwrap()
             .hand
             .len();
