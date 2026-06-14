@@ -303,6 +303,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn { .. }
@@ -475,6 +476,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn { .. }
@@ -1759,6 +1761,18 @@ fn resolve_ref(
                     .as_ref()
                     .and_then(crate::game::targeting::extract_amount_from_event)
             })
+            // CR 603.4: An intervening-`if` condition is checked at trigger
+            // *detection* (when `current_trigger_event` is still `None`) and
+            // re-checked at resolution. `EventContextAmount` must resolve at
+            // both times, so fall back to the detection-time event the same way
+            // `object_id_for_scope`'s `EventSource` arm does — otherwise the
+            // damage==toughness gate (Taii Wakeen) reads 0 at detection and
+            // never triggers.
+            .or_else(|| {
+                detection_trigger_event()
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -2027,6 +2041,41 @@ fn resolve_ref(
                 })
                 .count(),
         ),
+        // CR 400.7 + CR 603.10a: Reduce `property` over this turn's matching
+        // zone-change snapshots. Mirrors ZoneChangeCountThisTurn's population scan
+        // but sums/maxes/mins the per-record P/T/MV (CR 208.1 / CR 202.3) instead
+        // of counting.
+        QuantityRef::ZoneChangeAggregateThisTurn {
+            from,
+            to,
+            filter,
+            function,
+            property,
+        } => {
+            let vals = state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| {
+                    from.is_none_or(|zone| record.from_zone == Some(zone))
+                        && to.is_none_or(|zone| record.to_zone == zone)
+                        && matches_target_filter_on_zone_change_record(
+                            state,
+                            record,
+                            filter,
+                            &filter_ctx,
+                        )
+                })
+                .filter_map(|record| match property {
+                    ObjectProperty::Power => record.power,
+                    ObjectProperty::Toughness => record.toughness,
+                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(record.mana_value)),
+                });
+            match function {
+                AggregateFunction::Max => vals.max().unwrap_or(0),
+                AggregateFunction::Min => vals.min().unwrap_or(0),
+                AggregateFunction::Sum => vals.sum(),
+            }
+        }
         // CR 120.1 + CR 120.9 + CR 603.4: Damage dealt this turn matching the
         // supplied source/target filters. `group_by` selects whether records are
         // partitioned (per CR 120.9 "by a specific source") before `aggregate`
@@ -2657,6 +2706,16 @@ fn object_for_scope<'a>(
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
+        // CR 603.2 + CR 603.4: the object that received the triggering damage
+        // ("that creature"). Same dual-time (detection + resolution) fallback as
+        // `EventSource`, calling the recipient extractor.
+        ObjectScope::EventTarget => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
+            .and_then(|id| state.objects.get(&id)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to a live `GameObject` here — both are snapshot
@@ -2696,6 +2755,15 @@ fn object_id_for_scope(
             .cloned()
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e)),
+        // CR 603.2 + CR 603.4: the object that received the triggering damage
+        // ("that creature"). Same dual-time (detection + resolution) fallback as
+        // `EventSource`, calling the recipient extractor.
+        ObjectScope::EventTarget => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to an `ObjectId` here — both are snapshot
@@ -2995,6 +3063,22 @@ where
                 .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
                 .unwrap_or(0)
         }
+        // CR 603.2 + CR 208.1: the power/toughness of the object that received
+        // the triggering damage ("that creature's toughness"). Same live-then-LKI
+        // resolution as `EventSource`, keyed on the recipient object.
+        ObjectScope::EventTarget => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .and_then(&obj_extract)
+                .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
+                .unwrap_or(0)
+        }
         // CR 608.2k: An ability's effect referring to a specific untargeted
         // object previously referred to by that ability's cost OR trigger
         // condition still affects it. Resolved (first match wins) via:
@@ -3113,6 +3197,30 @@ fn resolve_object_mana_value(
         ObjectScope::EventSource => {
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .or_else(|| {
+                    state
+                        .lki_cache
+                        .get(&object_id)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
+        }
+        // CR 603.2 + CR 202.3: mana value of the object that received the
+        // triggering damage. Same live-then-LKI resolution as `EventSource`.
+        ObjectScope::EventTarget => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
             else {
                 return 0;
             };
@@ -5207,6 +5315,82 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
+    /// CR 400.7 + CR 700.4 + CR 208.1: aggregate the death-time power snapshot
+    /// over this turn's battlefield→graveyard records matching the filter. Sum
+    /// adds matching records; Max picks the largest; a non-matching destination
+    /// is excluded (returns 0 when none match).
+    #[test]
+    fn resolve_zone_change_aggregate_this_turn_sums_dies_power() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Genesis of the Daleks".to_string(),
+            Zone::Battlefield,
+        );
+        let dalek_a = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dalek".to_string()],
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let dalek_b = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dalek".to_string()],
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let non_dalek = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Human".to_string()],
+            power: Some(7),
+            ..ZoneChangeRecord::test_minimal(ObjectId(12), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        state
+            .zone_changes_this_turn
+            .extend([dalek_a, dalek_b, non_dalek]);
+
+        let dalek_filter = TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string()));
+
+        let sum = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: dalek_filter.clone(),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &sum, PlayerId(0), source), 6);
+
+        let max = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: dalek_filter.clone(),
+                function: AggregateFunction::Max,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &max, PlayerId(0), source), 3);
+
+        // A destination the records never matched yields 0.
+        let none_match = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: dalek_filter,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &none_match, PlayerId(0), source),
+            0
+        );
     }
 
     #[test]
