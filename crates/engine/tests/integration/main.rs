@@ -98,6 +98,7 @@ mod issue_1018_manifest_dread_choice;
 mod issue_1019_heraldic_banner_chosen_color;
 mod issue_1020_level_up_double_counters;
 mod issue_1021_recurring_nightmare;
+mod issue_1022_savai_triome_cycling;
 mod issue_1023_oversold_cemetery;
 mod issue_1025_rishkars_expertise;
 mod issue_1202_prepared_spell_cast_timing;
