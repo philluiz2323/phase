@@ -1214,7 +1214,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     )
 }
 
-/// CR 110.2a + CR 614.1c: "`<this permanent>` enters under the control of an
+/// CR 110.2a + CR 614.1d: "`<this permanent>` enters under the control of an
 /// opponent of your choice." — a self-ETB controller-override replacement.
 ///
 /// The permanent enters the battlefield directly under an opponent's control;
@@ -1264,7 +1264,7 @@ fn parse_self_enters_under_opponent(
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .valid_card(TargetFilter::SelfRef)
-            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            // CR 614.1d: battlefield-entry-scoped (see destination-gate note above).
             .destination_zone(Zone::Battlefield)
             // CR 110.2a: enters under an opponent's control (resolved at apply time).
             .enters_under(ControllerRef::Opponent)
@@ -12149,7 +12149,7 @@ mod snapshot_tests {
             assert_eq!(
                 def.destination_zone,
                 Some(Zone::Battlefield),
-                "{card_name}: battlefield-entry-scoped (CR 614.1c)"
+                "{card_name}: battlefield-entry-scoped (CR 614.1d)"
             );
             assert_eq!(
                 def.enters_under,
