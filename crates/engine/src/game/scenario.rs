@@ -3086,6 +3086,252 @@ mod tests {
         assert_eq!(state.players[1].life, 20);
     }
 
+    /// Cast a free (no-mana-cost) sorcery (already in the active player's hand)
+    /// and commit it to the stack, returning the `WaitingFor` the engine halts
+    /// in (the first resolution prompt). Helper for the "any player may"
+    /// group-bargain tests that must drive the per-player APNAP prompt loop by
+    /// hand.
+    fn cast_free_sorcery_to_prompt(runner: &mut GameRunner, spell: ObjectId) -> WaitingFor {
+        let card_id = runner.state.objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("CastSpell must be accepted");
+        // CR 601.2a–c: answer any cast-time target slot (the "target player"
+        // reward of Browbeat-class cards), then commit and begin resolving.
+        for _ in 0..16 {
+            match runner.state.waiting_for.clone() {
+                WaitingFor::TargetSelection { target_slots, .. } => {
+                    // Pick the first legal target for the slot.
+                    let target = target_slots[0].legal_targets[0].clone();
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(target),
+                        })
+                        .expect("cast-time target must be accepted");
+                }
+                WaitingFor::Priority { .. } => {
+                    if runner.state.stack.is_empty() {
+                        break;
+                    }
+                    if runner.act(GameAction::PassPriority).is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        runner.state.waiting_for.clone()
+    }
+
+    /// CR 608.2d + CR 101.4 (issue #3236): "any player may sacrifice a land of
+    /// their choice. If a player does, …" must offer EVERY player INCLUDING the
+    /// controller, in APNAP order (active player first), and the controller —
+    /// when they accept — must be able to sacrifice their OWN land.
+    ///
+    /// This is the BLOCKER 1 regression guard: if `chunk_actor` stamped the
+    /// sacrifice TargetFilter with `controller: Opponent`, the controller's own
+    /// land would be filtered out and `legal_targets` would be empty.
+    #[test]
+    fn any_player_may_sacrifice_controller_accepts_own_land() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // P0 is the active player (controller). Give each player a land.
+        let p0_land = scenario.add_basic_land(P0, ManaColor::Green);
+        let _p1_land = scenario.add_basic_land(P1, ManaColor::White);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Group Bargain Test",
+                false,
+                "any player may sacrifice a land of their choice. \
+                 if a player does, you draw a card",
+            )
+            .id();
+        // A card to draw when the accept-consequence fires.
+        scenario.with_library_top(P0, &["Reward Card"]);
+        let mut runner = scenario.build();
+
+        let wf = cast_free_sorcery_to_prompt(&mut runner, spell);
+
+        // CR 101.4: the controller (active player P0) is offered FIRST, and the
+        // other player remains queued.
+        match wf {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(
+                    player, P0,
+                    "controller (active player) must be offered first under AnyPlayer"
+                );
+                assert!(
+                    remaining.contains(&P1),
+                    "the non-controller must still be queued, got {remaining:?}"
+                );
+            }
+            other => panic!("expected OpponentMayChoice, got {other:?}"),
+        }
+
+        // The controller accepts → must be offered their OWN land as a legal
+        // sacrifice (BLOCKER 1).
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("controller accept must be handled");
+
+        match &runner.state.waiting_for {
+            WaitingFor::MultiTargetSelection {
+                player,
+                legal_targets,
+                ..
+            } => {
+                assert_eq!(*player, P0, "the accepting controller picks the sacrifice");
+                assert!(
+                    legal_targets.contains(&p0_land),
+                    "BLOCKER 1: controller's OWN land must be a legal sacrifice, \
+                     got legal_targets={legal_targets:?}"
+                );
+            }
+            other => panic!("expected MultiTargetSelection for the sacrifice, got {other:?}"),
+        }
+
+        // Submit the controller's own land and confirm it is sacrificed and the
+        // "if a player does" consequence (draw a card) fires.
+        let hand_before = runner
+            .state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![p0_land],
+            })
+            .expect("sacrificing the controller's own land must be legal");
+        // Drain any remaining priority.
+        for _ in 0..8 {
+            if let WaitingFor::Priority { .. } = runner.state.waiting_for {
+                if runner.state.stack.is_empty() || runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        assert_eq!(
+            runner.state.objects[&p0_land].zone,
+            Zone::Graveyard,
+            "controller's land must be sacrificed to the graveyard"
+        );
+        let hand_after = runner
+            .state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+        assert_eq!(
+            hand_after,
+            hand_before + 1,
+            "the 'if a player does' consequence must fire after the sacrifice"
+        );
+    }
+
+    /// CR 608.2d + CR 101.4 (issue #3236): Browbeat-class — when ALL players
+    /// (including the controller) decline "any player may have ~ deal 5 damage
+    /// to them", the "if no one does" reward fires.
+    ///
+    /// This is the step-3 (controller-inclusion) regression guard: the loop must
+    /// prompt the controller too, and only after the controller AND the opponent
+    /// both decline does the reward resolve.
+    #[test]
+    fn any_player_may_all_decline_fires_reward() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Browbeat Test",
+                false,
+                "any player may have ~ deal 5 damage to them. \
+                 if no one does, you draw three cards",
+            )
+            .id();
+        // Library to draw from for the reward.
+        scenario.with_library_top(P0, &["A", "B", "C", "D"]);
+        let mut runner = scenario.build();
+
+        let wf = cast_free_sorcery_to_prompt(&mut runner, spell);
+
+        // Controller (P0) offered first.
+        match wf {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(player, P0, "controller must be offered first");
+                assert!(remaining.contains(&P1), "opponent must be queued");
+            }
+            other => panic!("expected OpponentMayChoice, got {other:?}"),
+        }
+
+        let hand_before = runner
+            .state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+
+        // Controller declines.
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("controller decline must be handled");
+        // Now the opponent must be prompted (proves the controller did NOT end
+        // the loop alone).
+        match &runner.state.waiting_for {
+            WaitingFor::OpponentMayChoice { player, .. } => {
+                assert_eq!(
+                    *player, P1,
+                    "opponent must be prompted after controller declines"
+                );
+            }
+            other => panic!("expected opponent's OpponentMayChoice, got {other:?}"),
+        }
+        // Opponent declines → reward fires.
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("opponent decline must be handled");
+        for _ in 0..8 {
+            if let WaitingFor::Priority { .. } = runner.state.waiting_for {
+                if runner.state.stack.is_empty() || runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        let hand_after = runner
+            .state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+        assert_eq!(
+            hand_after,
+            hand_before + 3,
+            "all players declined → the 'if no one does' reward (draw three) must fire"
+        );
+    }
+
     #[test]
     fn add_creature_returns_object_id_on_battlefield() {
         let mut scenario = GameScenario::new();

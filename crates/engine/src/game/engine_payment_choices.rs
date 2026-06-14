@@ -158,7 +158,18 @@ pub(super) fn handle_opponent_may_choice(
 
             if let Some(legal) = target_selection {
                 if !legal.is_empty() {
-                    if let Some(sub) = ability.sub_ability.take() {
+                    if let Some(mut sub) = ability.sub_ability.take() {
+                        // CR 608.2c + CR 608.2d: the "If a player does, …"
+                        // consequence runs because the player accepted. Carry the
+                        // accepted ability's context (with
+                        // `optional_effect_performed = true`) onto the stashed
+                        // continuation so its `OptionalEffectPerformed` gate
+                        // evaluates true when the continuation drains after the
+                        // sacrifice/tap target is chosen — otherwise the
+                        // consequence (e.g. "put this creature on top of its
+                        // owner's library") is silently skipped.
+                        sub.context = ability.context.clone();
+                        sub.context.optional_effect_performed = true;
                         state.pending_continuation = Some(PendingContinuation::new(sub));
                     }
                     state.waiting_for = WaitingFor::MultiTargetSelection {
@@ -202,12 +213,31 @@ pub(super) fn handle_opponent_may_choice(
                     .as_ref()
                     .is_some_and(AbilityCondition::is_optional_effect_performed)
                 {
+                    // CR 608.2d: "If a player does, X. If no one does, Y." — no
+                    // one accepted, so fire Y (the else branch of the
+                    // OptionalEffectPerformed sub).
                     if let Some(ref else_branch) = sub.else_ability {
                         let mut else_resolved = else_branch.as_ref().clone();
                         else_resolved.context = ability.context.clone();
                         effects::resolve_ability_chain(state, &else_resolved, events, 1)
                             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                     }
+                } else if sub
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+                {
+                    // CR 608.2d + CR 101.4: standalone "If no one does, Y" reward
+                    // on an "any opponent/player may" head (Browbeat, Book
+                    // Burning). The reward is carried directly on the
+                    // `Not(OptionalEffectPerformed)`-gated sub. No one accepted,
+                    // so fire the sub's effect now. (On accept, the head's own
+                    // chain resolution evaluates this same negated condition as
+                    // false and skips it.)
+                    let mut sub_resolved = sub.as_ref().clone();
+                    sub_resolved.context = ability.context.clone();
+                    effects::resolve_ability_chain(state, &sub_resolved, events, 1)
+                        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                 }
             }
         }
