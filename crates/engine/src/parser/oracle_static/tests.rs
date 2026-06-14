@@ -16812,3 +16812,38 @@ fn palladia_mors_and_karakyk_guardian_conditional_hexproof_full_card_flip() {
         );
     }
 }
+
+/// CR 611.3a + CR 613.1f + CR 509.1b + CR 702.11b: Ratonhnhaké꞉ton uses the
+/// inverted condition form and gates two sibling statics with the same "hasn't
+/// dealt damage yet" condition. The multi-static path must preserve both the
+/// Hexproof grant and the CantBeBlocked mode under `Not(SourceHasDealtDamage)`.
+#[test]
+fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
+    let defs = parse_static_line_multi(
+        "As long as ~ hasn't dealt damage yet, it has hexproof and can't be blocked.",
+    );
+    assert_eq!(defs.len(), 2, "expected hexproof grant plus evasion static");
+
+    let expected_condition = Some(StaticCondition::Not {
+        condition: Box::new(StaticCondition::SourceHasDealtDamage),
+    });
+
+    let hexproof = defs
+        .iter()
+        .find(|def| {
+            def.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing conditional hexproof grant");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(hexproof.condition, expected_condition);
+
+    let evasion = defs
+        .iter()
+        .find(|def| def.mode == StaticMode::CantBeBlocked)
+        .expect("missing conditional can't-be-blocked static");
+    assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(evasion.condition, expected_condition);
+}
