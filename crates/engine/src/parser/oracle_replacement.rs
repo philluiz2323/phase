@@ -12159,6 +12159,34 @@ mod snapshot_tests {
         }
     }
 
+    /// Regression for #3213: the controller-override line must route THROUGH the
+    /// classifier (`REPLACEMENT_CONTAINS_PATTERNS`) to `parse_replacement_line`.
+    /// The test above calls `parse_replacement_line` directly (bypassing the
+    /// classifier), which is exactly why it passed while the real cards still
+    /// gapped. This drives the full `parse_oracle_text` path: reverting the
+    /// classifier entry makes the line fall through to the effect parser as
+    /// `Unimplemented`, producing zero replacements — caught here.
+    #[test]
+    fn full_card_enters_under_opponent_routes_to_replacement() {
+        let result = crate::parser::oracle::parse_oracle_text(
+            "Xantcha enters under the control of an opponent of your choice.",
+            "Xantcha, Sleeper Agent",
+            &[],
+            &["Creature".to_string()],
+            &["Phyrexian".to_string(), "Minion".to_string()],
+        );
+        assert!(
+            result.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::Moved
+                    && r.enters_under == Some(ControllerRef::Opponent)
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+            }),
+            "the controller-override line must route to a replacement (not Unimplemented); \
+             replacements = {:?}",
+            result.replacements
+        );
+    }
+
     /// The control clause is NOT claimed when the subject is an external filter
     /// rather than the permanent itself — the self-subject gate must reject it.
     #[test]
