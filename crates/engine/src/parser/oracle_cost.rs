@@ -926,32 +926,28 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 /// "if [condition]" off such a sentence, so the whole sentence reaches
 /// `try_parse_cost_reduction` (whose own "if" arm re-homes the condition). #3223.
 ///
-/// Combinator-based (parser-combinator gate): mirrors `try_parse_cost_reduction`'s
-/// exact `nom_on_lower` + `parse_mana_symbols` usage — no string-method dispatch.
-pub(crate) fn is_self_cost_reduction_prefix(text: &str) -> bool {
-    let lower = text.to_lowercase();
+/// Combinator-based (parser-combinator gate): runs on an already-lowercase slice
+/// and mirrors `try_parse_cost_reduction`'s `parse_mana_symbols` path.
+pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
     // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less to
     // activate"). The spell form ("this spell costs {N} less to cast") is parsed
     // through a different (spell) path that does NOT route through
     // `strip_cost_reduction_node`, so suppressing the suffix split there would
     // only strand its condition as a swallowed clause (e.g. Lashwhip Predator).
-    let Some(((), rest)) = nom_on_lower(text, &lower, |i| {
-        value((), tag("this ability costs ")).parse(i)
-    }) else {
+    let Ok((rest, _)) = tag::<_, _, nom::error::Error<&str>>("this ability costs ").parse(lower)
+    else {
         return false;
     };
 
     // Extract the {N} mana amount (same parse_mana_symbols path as the reducer).
-    let rest_lower = rest.to_lowercase();
-    let Some((_mana_cost, after_mana)) = parse_mana_symbols(&rest_lower) else {
+    let Some((_mana_cost, after_mana)) = parse_mana_symbols(rest) else {
         return false;
     };
 
     let after_mana = after_mana.trim_start();
-    nom_on_lower(after_mana, after_mana, |i| {
-        value((), tag("less to activate")).parse(i)
-    })
-    .is_some()
+    tag::<_, _, nom::error::Error<&str>>("less to activate")
+        .parse(after_mana)
+        .is_ok()
 }
 
 /// CR 601.2f: Parse "this ability/spell costs {N} less to activate/cast for each [condition]".
