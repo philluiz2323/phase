@@ -473,7 +473,16 @@ fn atomic_with_types(
 /// asserts that status explicitly so a future fix re-classifies it deliberately.
 #[test]
 fn any_player_group_bargain_cards_flip_supported() {
-    let clean_cards: &[(&str, &str, &[&str], &[&str], &str)] = &[
+    // (name, type_line, types, keywords, oracle) — aliased to satisfy
+    // clippy::type_complexity (CI runs `-D warnings`).
+    type CardSpec = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        &'static str,
+    );
+    let clean_cards: &[CardSpec] = &[
         (
             "Browbeat",
             "Sorcery",
